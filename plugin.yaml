@@ -1,0 +1,5 @@
+name: commandcode-alpha-provider
+kind: model-provider
+version: 0.1.0
+description: Command Code (commandcode.ai) Go/free-tier accounts via the private /alpha/generate protocol
+author: NanamiMio
