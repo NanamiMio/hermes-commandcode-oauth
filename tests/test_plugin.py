@@ -283,11 +283,11 @@ class ErrorClassificationTest(unittest.TestCase):
 class AuthTest(unittest.TestCase):
     @unittest.skipUnless(HAS_HERMES_TREE, "needs a Hermes tree on sys.path (providers)")
     def test_pool_provider_canonicalises_aliases(self):
-        self.assertEqual(auth.pool_provider(SimpleNamespace(provider="commandcode-alpha")), "commandcode-alpha")
-        self.assertEqual(auth.pool_provider(SimpleNamespace(provider="commandcode-alpha")), "commandcode-alpha")
+        for requested in ("commandcode-alpha", "commandcode-oauth", "COMMANDCODE-ALPHA"):
+            self.assertEqual(auth.pool_provider(SimpleNamespace(provider=requested)), "commandcode-oauth")
 
-    def test_pool_provider_falls_back_to_the_requested_name(self):
-        self.assertEqual(auth.pool_provider(SimpleNamespace(provider="")), "commandcode-alpha")
+    def test_pool_provider_falls_back_to_the_canonical_name(self):
+        self.assertEqual(auth.pool_provider(SimpleNamespace(provider="")), "commandcode-oauth")
 
     def test_read_cli_token_raises_when_absent(self):
         original = auth.CLI_AUTH_PATH

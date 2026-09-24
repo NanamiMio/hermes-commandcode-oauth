@@ -39,7 +39,7 @@ STUDIO_URL = "https://commandcode.ai"
 CALLBACK_PORT = 5959
 # ``manual:`` prefix = the pool never prunes the row when re-seeding from env/config.
 POOL_SOURCE = "manual:commandcode_cli"
-CANONICAL_PROVIDER = "commandcode-alpha"
+CANONICAL_PROVIDER = "commandcode-oauth"
 
 
 class CommandCodeAuthError(RuntimeError):
