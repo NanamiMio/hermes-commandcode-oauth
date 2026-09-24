@@ -60,16 +60,32 @@ logger = logging.getLogger("plugins.commandcode_alpha")
 # defaults are the free ones rather than whatever the relay lists last.
 FREE_FIRST_MODELS = ("meituan/LongCat-2.0:free", "poolside/laguna-s-2.1-free")
 
+# Catalog snapshot for the picker: core never probes a non-api_key profile, so
+# ``provider_model_ids`` (the /model picker, the Desktop picker and `hermes model`) reads
+# this list for us — ``fetch_models`` still serves the live list to surfaces that probe
+# (the setup wizard). Refresh by pasting ``fetch_models()`` output back here.
 FALLBACK_MODELS = (
-    "deepseek/deepseek-v4.1-flash",
-    "meituan/LongCat-2.0:free",
-    "deepseek/deepseek-v4-pro",
-    "moonshotai/Kimi-K3",
-    "z-ai/glm-5.3-flash",
-    "MiniMaxAI/MiniMax-M3",
-    "Qwen/Qwen3.8-Max-0902",
-    "xai/grok-4.5",
-    "xiaomi/mimo-v2.5-pro",
+    "meituan/LongCat-2.0:free", "poolside/laguna-s-2.1-free", "claude-sonnet-5", "claude-sonnet-4-6",
+    "claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5",
+    "claude-opus-4-8", "claude-opus-4-7", "claude-haiku-4-5-20251001", "gpt-6-astra",
+    "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
+    "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.3-codex",
+    "gpt-5.4-mini", "deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-flash-vision-exp",
+    "deepseek/deepseek-v4-flash-fast", "deepseek/deepseek-v4.1-flash", "moonshotai/Kimi-K3", "moonshotai/Kimi-K2.7-Code",
+    "moonshotai/Kimi-K2.7-Code-Highspeed", "moonshotai/Kimi-K2.6", "moonshotai/Kimi-K2.5", "z-ai/glm-5.3-flash",
+    "z-ai/glm-5.3-flashx", "zai-org/GLM-5.3", "zai-org/GLM-5.2", "zai-org/GLM-5.2-Fast",
+    "zai-org/GLM-5.1", "zai-org/GLM-5", "MiniMaxAI/MiniMax-M3", "MiniMaxAI/MiniMax-M2.7",
+    "MiniMaxAI/MiniMax-M2.5", "xiaomi/mimo-v2.6-pro", "xiaomi/mimo-v2.6-pro-ultraspeed", "xiaomi/mimo-v2.6-flash",
+    "xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5", "Qwen/Qwen3.8-Omni-Flash", "Qwen/Qwen3.8-Max-0902",
+    "Qwen/Qwen3.8-Max", "Qwen/Qwen3.8-27B", "Qwen/Qwen3.8-Flash", "Qwen/Qwen3.7-Max",
+    "Qwen/Qwen3.7-Plus", "Qwen/Qwen3.7-Flash", "Qwen/Qwen3.6-Max-Preview", "Qwen/Qwen3.6-Plus",
+    "meituan/LongCat-2.0", "stepfun/Step-5-Preview", "stepfun/Step-3.7-Flash", "stepfun/Step-3.5-Flash",
+    "tencent/hy3-paid", "tencent/hy4-preview", "google/gemini-3.8-flash", "google/gemini-3.7-flash",
+    "google/gemini-3.6-flash", "google/gemini-3.5-flash", "google/gemini-3.5-flash-lite", "google/gemini-3.1-flash-lite",
+    "sakana/fugu-ultra", "nvidia/nemotron-3-ultra-550b-a55b", "thinkingmachines/inkling", "thinkingmachines/inkling-small",
+    "stealth/space-bunny-alpha", "inclusionai/ling-3.0-flash-sante:free", "meta/muse-spark-1.1", "meta/muse-spark-1.2",
+    "meta/muse-spark-1.2-contributor", "meta/muse-spark-1.3", "meta/muse-spark-1.3-contributor", "xai/grok-4.5",
+    "xai/grok-4.6", "xai/grok-4.7",
 )
 
 # The portal endpoints live at the API origin, not under the Provider API's /provider/v1.
@@ -220,7 +236,7 @@ commandcode_alpha = CommandCodeAlphaProfile(
     env_vars=(),
     base_url=ALPHA_ORIGIN,
     auth_type="oauth_external",
-    display_name="Command Code (Go / free tier)",
+    display_name="CommandCode (OAuth)",
     description="Command Code Go/free accounts — CLI credentials over the private /alpha/generate protocol",
     fallback_models=FALLBACK_MODELS,
     # Provider-owned auth / classification. These three are dataclass *fields* on
