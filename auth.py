@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 from urllib.parse import urlparse
 
-logger = logging.getLogger("plugins.commandcode_alpha.auth")
+logger = logging.getLogger("plugins.commandcode_oauth.auth")
 
 CLI_AUTH_PATH = Path.home() / ".commandcode" / "auth.json"
 ALPHA_ORIGIN = "https://api.commandcode.ai"

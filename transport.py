@@ -42,7 +42,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional
 
-logger = logging.getLogger("plugins.commandcode_alpha.transport")
+logger = logging.getLogger("plugins.commandcode_oauth.transport")
 
 ALPHA_ORIGIN = "https://api.commandcode.ai"
 ALPHA_PATH = "/alpha/generate"

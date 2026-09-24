@@ -81,3 +81,19 @@ python -m unittest discover -s tests -v   # or: pytest tests -q
 
 This is a third-party integration on an **undocumented** endpoint that Command Code may change at
 any time; it is not endorsed by Command Code or Nous Research.
+
+## Why `auth_type="api_key"`, and why the model list is live
+
+Two core rules shaped this, both verified in `hermes_cli`:
+
+- The model picker only probes providers declared `auth_type="api_key"`; anything else is answered
+  from `fallback_models` alone (`hermes_cli/models.py`). Declaring `api_key` is what makes the
+  picker call `fetch_models()` live, so the catalog tracks the account instead of a pinned snapshot.
+  What is OAuth-shaped about this provider — the CLI grant, the studio hand-off, rotation — stays in
+  `auth_handler` / `refresh_credential`, and the credential still comes from the pool.
+- `register_plugin_provider` **drops an `api_key` profile that declares no `env_vars`**, so the
+  provider would never be mirrored into `PROVIDER_REGISTRY` and every run would fail with
+  "Unknown provider". Hence `COMMANDCODE_CLI_TOKEN`: it accepts the same bearer the Command Code CLI
+  stores (the pool row stays the primary source), and it is what makes the mirrored row well-formed.
+
+`fallback_models` is therefore a small offline fallback (no token / network down), not the catalog.

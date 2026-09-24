@@ -54,7 +54,7 @@ from .auth import auth_handler, refresh_credential
 from .errors import classify_api_error
 from .transport import ALPHA_ORIGIN, CommandCodeAlphaClient, cli_token
 
-logger = logging.getLogger("plugins.commandcode_alpha")
+logger = logging.getLogger("plugins.commandcode_oauth")
 
 # Models the Go tier always has; kept in front of the live catalogue so the picker's
 # defaults are the free ones rather than whatever the relay lists last.
@@ -65,27 +65,17 @@ FREE_FIRST_MODELS = ("meituan/LongCat-2.0:free", "poolside/laguna-s-2.1-free")
 # this list for us — ``fetch_models`` still serves the live list to surfaces that probe
 # (the setup wizard). Refresh by pasting ``fetch_models()`` output back here.
 FALLBACK_MODELS = (
-    "meituan/LongCat-2.0:free", "poolside/laguna-s-2.1-free", "claude-sonnet-5", "claude-sonnet-4-6",
-    "claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5",
-    "claude-opus-4-8", "claude-opus-4-7", "claude-haiku-4-5-20251001", "gpt-6-astra",
-    "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
-    "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.3-codex",
-    "gpt-5.4-mini", "deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-flash-vision-exp",
-    "deepseek/deepseek-v4-flash-fast", "deepseek/deepseek-v4.1-flash", "moonshotai/Kimi-K3", "moonshotai/Kimi-K2.7-Code",
-    "moonshotai/Kimi-K2.7-Code-Highspeed", "moonshotai/Kimi-K2.6", "moonshotai/Kimi-K2.5", "z-ai/glm-5.3-flash",
-    "z-ai/glm-5.3-flashx", "zai-org/GLM-5.3", "zai-org/GLM-5.2", "zai-org/GLM-5.2-Fast",
-    "zai-org/GLM-5.1", "zai-org/GLM-5", "MiniMaxAI/MiniMax-M3", "MiniMaxAI/MiniMax-M2.7",
-    "MiniMaxAI/MiniMax-M2.5", "xiaomi/mimo-v2.6-pro", "xiaomi/mimo-v2.6-pro-ultraspeed", "xiaomi/mimo-v2.6-flash",
-    "xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5", "Qwen/Qwen3.8-Omni-Flash", "Qwen/Qwen3.8-Max-0902",
-    "Qwen/Qwen3.8-Max", "Qwen/Qwen3.8-27B", "Qwen/Qwen3.8-Flash", "Qwen/Qwen3.7-Max",
-    "Qwen/Qwen3.7-Plus", "Qwen/Qwen3.7-Flash", "Qwen/Qwen3.6-Max-Preview", "Qwen/Qwen3.6-Plus",
-    "meituan/LongCat-2.0", "stepfun/Step-5-Preview", "stepfun/Step-3.7-Flash", "stepfun/Step-3.5-Flash",
-    "tencent/hy3-paid", "tencent/hy4-preview", "google/gemini-3.8-flash", "google/gemini-3.7-flash",
-    "google/gemini-3.6-flash", "google/gemini-3.5-flash", "google/gemini-3.5-flash-lite", "google/gemini-3.1-flash-lite",
-    "sakana/fugu-ultra", "nvidia/nemotron-3-ultra-550b-a55b", "thinkingmachines/inkling", "thinkingmachines/inkling-small",
-    "stealth/space-bunny-alpha", "inclusionai/ling-3.0-flash-sante:free", "meta/muse-spark-1.1", "meta/muse-spark-1.2",
-    "meta/muse-spark-1.2-contributor", "meta/muse-spark-1.3", "meta/muse-spark-1.3-contributor", "xai/grok-4.5",
-    "xai/grok-4.6", "xai/grok-4.7",
+    "meituan/LongCat-2.0:free",
+    "poolside/laguna-s-2.1-free",
+    "deepseek/deepseek-v4.1-flash",
+    "deepseek/deepseek-v4-pro",
+    "Qwen/Qwen3.8-Omni-Flash",
+    "meta/muse-spark-1.3-contributor",
+    "meta/muse-spark-1.3",
+    "moonshotai/Kimi-K3",
+    "z-ai/glm-5.3-flash",
+    "MiniMaxAI/MiniMax-M3",
+    "Qwen/Qwen3.7-Max",
 )
 
 # The portal endpoints live at the API origin, not under the Provider API's /provider/v1.
@@ -120,7 +110,13 @@ def _as_float(value: Any) -> Optional[float]:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-class CommandCodeAlphaProfile(ProviderProfile):
+# ``auth_type="api_key"`` is deliberate: the model picker only probes providers declared that way
+# (hermes_cli/models.py: a non-api_key profile is answered from ``fallback_models`` alone). Our
+# credential *is* a bearer token used as a key — the pool row is resolved through the api_key path,
+# which reaches the same pool — while everything OAuth-shaped (the CLI grant, the studio hand-off,
+# rotation) lives in ``auth_handler`` / ``refresh_credential`` below. The static list is therefore
+# only an offline fallback, not the catalog.
+class CommandCodeOAuthProfile(ProviderProfile):
     """Command Code Go/free tiers through the CLI's ``/alpha/generate`` protocol."""
 
     def create_client(self, **client_kwargs: Any) -> Any:
@@ -224,18 +220,22 @@ class CommandCodeAlphaProfile(ProviderProfile):
         )
 
 
-commandcode_alpha = CommandCodeAlphaProfile(
+commandcode_oauth = CommandCodeOAuthProfile(
     # Named after the wire, like upstream's other Command Code profiles; ``commandcode-oauth``
     # is the alias because that is what the integration PR/issue call it and what existing
     # configs (``model.provider``) already say — so nothing has to be migrated.
     # Deliberately NOT aliased to "command-code": that token is the model-id vendor prefix
     # ("command-code/<model>") and would read as a provider name here.
-    name="commandcode-alpha",
-    aliases=("commandcode-oauth",),
+    name="commandcode-oauth",
+    aliases=("commandcode-alpha",),
     api_mode="chat_completions",
-    env_vars=(),
+    # Declared so the registry mirror accepts an api_key row at all
+    # (hermes_cli/auth_plugin_providers.register_plugin_provider drops api_key profiles with no
+    # env_vars). The pool row is the primary credential — auth_handler fills it — and this env
+    # var accepts the same bearer the Command Code CLI stores, which is what /alpha/generate wants.
+    env_vars=("COMMANDCODE_CLI_TOKEN",),
     base_url=ALPHA_ORIGIN,
-    auth_type="oauth_external",
+    auth_type="api_key",
     display_name="CommandCode (OAuth)",
     description="Command Code Go/free accounts — CLI credentials over the private /alpha/generate protocol",
     fallback_models=FALLBACK_MODELS,
@@ -247,4 +247,4 @@ commandcode_alpha = CommandCodeAlphaProfile(
     classify_api_error=classify_api_error,
 )
 
-register_provider(commandcode_alpha)
+register_provider(commandcode_oauth)
