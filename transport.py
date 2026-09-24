@@ -138,10 +138,24 @@ def _image_mime(url: str) -> str:
     return match.group(1) if match else ""
 
 
+def _media_url(part: Dict[str, Any]) -> tuple[str, str]:
+    """``(kind, url)`` for any shape a caller sends — flat ``image``, OpenAI's nested
+    ``image_url``, or an Anthropic ``source`` block."""
+    kind = "video" if "video" in str(part.get("type", "")) else "image"
+    url = part.get(kind)
+    if isinstance(url, dict):
+        url = url.get("url")
+    if not isinstance(url, str) or not url:
+        nested = part.get(f"{kind}_url")
+        url = nested.get("url") if isinstance(nested, dict) else nested if isinstance(nested, str) else ""
+    return kind, url if isinstance(url, str) else ""
+
+
 def _image_placeholder(part: Dict[str, Any]) -> str:
     """What a text-only model (or an unusable part) sees instead of the pixels."""
-    kind = "video" if "video" in str(part.get("type", "")) else "image"
-    return f"[{kind}: {_image_mime(str(part.get(kind) or "")) or 'attached'}]"
+    kind, url = _media_url(part)
+    return f"[{kind}: {_image_mime(url) or 'attached'}]"
+
 
 
 def _normalize_media_part(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -150,13 +164,7 @@ def _normalize_media_part(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     OpenAI's nested ``{"image_url": {"url": ...}}`` is rejected (400 "expected string,
     received array"); Anthropic-shaped ``{"source": {...}}`` is accepted verbatim.
     """
-    kind = "video" if "video" in str(part.get("type", "")) else "image"
-    url = part.get(kind)
-    if isinstance(url, dict):
-        url = url.get("url")
-    if not isinstance(url, str) or not url:
-        nested = part.get(f"{kind}_url")
-        url = nested.get("url") if isinstance(nested, dict) else nested if isinstance(nested, str) else ""
+    kind, url = _media_url(part)
     if isinstance(url, str) and url:
         # ``mimeType`` is what makes the endpoint actually *process* the pixels: the same part
         # without it is accepted and silently ignored (verified against a solid-colour image).
@@ -207,9 +215,7 @@ def format_messages(
                     if media is not None:
                         parts.append(media)
                     else:
-                        placeholder = _image_placeholder(part)
-                        if placeholder != "[image: attached]":
-                            texts.append(placeholder)
+                        texts.append(_image_placeholder(part))
             text = " ".join(t for t in texts if t)
             parts.insert(0, {"type": "text", "text": text})
             wire_msgs.append({"role": "user", "content": parts})

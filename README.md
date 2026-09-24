@@ -81,15 +81,3 @@ python -m unittest discover -s tests -v   # or: pytest tests -q
 
 This is a third-party integration on an **undocumented** endpoint that Command Code may change at
 any time; it is not endorsed by Command Code or Nous Research.
-
-## Vision
-
-Images work through `/alpha`, but two things have to be right:
-
-- **`mimeType` is required** on the image part (`{"type": "image", "image": <data-url>, "mimeType": "image/png"}`).
-  Without it the endpoint accepts the part and silently ignores the pixels — a solid blue 64x64
-  answered "White" until the field was added. Parts whose mime type cannot be parsed are dropped,
-  and text-only models (registry deny-list in `transport.py`) get a text placeholder instead.
-- **Pick a model that actually decodes pixels.** `Qwen/Qwen3.8-Omni-Flash` reads a solid-blue
-  image correctly; `deepseek/deepseek-v4-flash-vision-exp` accepts the part but answers as if no
-  image were attached, so point `auxiliary.vision.model` at the Omni model.
