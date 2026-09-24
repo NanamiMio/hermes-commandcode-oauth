@@ -1,5 +1,7 @@
-name: commandcode-alpha-provider
+name: commandcode-oauth
 kind: model-provider
 version: 0.1.0
-description: Command Code (commandcode.ai) Go/free-tier accounts via the private /alpha/generate protocol
+description: Command Code (commandcode.ai) as a model provider for accounts that sign in with the Command Code CLI — same endpoint and sign-in the CLI uses, through documented plugin seams only.
 author: NanamiMio
+optional_env:
+  - COMMANDCODE_CLI_TOKEN
