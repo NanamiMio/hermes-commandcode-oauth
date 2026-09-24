@@ -30,10 +30,19 @@ Behaviour worth knowing, all covered by tests:
 ## Install
 
 ```bash
-cp -r . ~/.hermes/plugins/model-providers/commandcode-oauth/   # user-level; no packaging needed
+# straight from the repository
+hermes plugins install NanamiMio/hermes-commandcode-oauth
+
+# ...or by hand, as a user-level plugin
+cp -r . ~/.hermes/plugins/model-providers/commandcode-oauth/
+
+# then
 hermes auth add commandcode-oauth    # reuses the CLI sign-in, or opens the studio hand-off
 hermes model                         # pick commandcode-oauth, then a model
 ```
+
+The catalog entry (NousResearch/hermes-agent#121888) is pending review; once it lands,
+`hermes plugins search commandcode` finds it and `hermes plugins install commandcode-oauth` works.
 
 ## Notes
 
