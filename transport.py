@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import json
+import re
 import logging
 import os
 import platform
@@ -117,6 +118,32 @@ def cli_token() -> str:
     return ""
 
 
+# The vendor registry marks these text-only: pixels sent to them are dropped server-side, so an
+# attached image becomes a text placeholder instead of vanishing. Unknown ids stay image-capable
+# (the registry's own fallback), which is why this is a deny-list and not an allow-list.
+_TEXT_ONLY_MODELS = frozenset({
+    "deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-flash-fast",
+    "zai-org/GLM-5.3", "zai-org/GLM-5.2", "zai-org/GLM-5.2-Fast", "zai-org/GLM-5.1", "zai-org/GLM-5",
+    "MiniMaxAI/MiniMax-M2.7", "minimax/minimax-m2.7-free", "MiniMaxAI/MiniMax-M2.5",
+    "xiaomi/mimo-v2.5-pro", "Qwen/Qwen3.6-Max-Preview", "Qwen/Qwen3.7-Max",
+    "meituan/LongCat-2.0:free", "stepfun/Step-3.5-Flash", "tencent/hy4-preview", "tencent/Hy3",
+    "tencent/hy3-paid", "nvidia/nemotron-3-ultra-550b-a55b", "poolside/laguna-s-2.1-free",
+    "inclusionai/ling-3.0-flash-free", "inclusionai/ling-3.0-flash-sante:free",
+})
+
+
+def _image_mime(url: str) -> str:
+    """``image/png`` out of ``data:image/png;base64,…``; empty when it is not a data uri."""
+    match = re.match(r"data:([^;,]+)", url or "")
+    return match.group(1) if match else ""
+
+
+def _image_placeholder(part: Dict[str, Any]) -> str:
+    """What a text-only model (or an unusable part) sees instead of the pixels."""
+    kind = "video" if "video" in str(part.get("type", "")) else "image"
+    return f"[{kind}: {_image_mime(str(part.get(kind) or "")) or 'attached'}]"
+
+
 def _normalize_media_part(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """One non-text content part → the wire shape (``{"type": "image", "image": url}``).
 
@@ -131,14 +158,24 @@ def _normalize_media_part(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         nested = part.get(f"{kind}_url")
         url = nested.get("url") if isinstance(nested, dict) else nested if isinstance(nested, str) else ""
     if isinstance(url, str) and url:
-        return {"type": kind, kind: url}
+        # ``mimeType`` is what makes the endpoint actually *process* the pixels: the same part
+        # without it is accepted and silently ignored (verified against a solid-colour image).
+        mime = _image_mime(url)
+        return {"type": kind, kind: url, "mimeType": mime} if mime else None
     if isinstance(part.get("source"), dict):
         return part
     return None
 
 
-def format_messages(messages: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]]]:
-    """Split out the system prompt and convert messages to the wire format."""
+def format_messages(
+    messages: List[Dict[str, Any]], model: str = ""
+) -> tuple[str, List[Dict[str, Any]]]:
+    """Split out the system prompt and convert messages to the wire format.
+
+    ``model`` gates attachments: a text-only model gets a placeholder so the caller can still
+    see that an image was attached, rather than a part the endpoint would drop.
+    """
+    images_ok = (model or "").strip() not in _TEXT_ONLY_MODELS
     system_parts: List[str] = []
     wire_msgs: List[Dict[str, Any]] = []
     call_id_to_name: Dict[str, str] = {}
@@ -166,9 +203,13 @@ def format_messages(messages: List[Dict[str, Any]]) -> tuple[str, List[Dict[str,
                     if part.get("type") == "text":
                         texts.append(part.get("text", ""))
                         continue
-                    media = _normalize_media_part(part)
+                    media = _normalize_media_part(part) if images_ok else None
                     if media is not None:
                         parts.append(media)
+                    else:
+                        placeholder = _image_placeholder(part)
+                        if placeholder != "[image: attached]":
+                            texts.append(placeholder)
             text = " ".join(t for t in texts if t)
             parts.insert(0, {"type": "text", "text": text})
             wire_msgs.append({"role": "user", "content": parts})
@@ -245,7 +286,7 @@ def _token_from_kwargs(api_key: Optional[str]) -> str:
 
 
 def _request_body(api_kwargs: Dict[str, Any], model: str) -> Dict[str, Any]:
-    system_prompt, wire_msgs = format_messages(api_kwargs.get("messages") or [])
+    system_prompt, wire_msgs = format_messages(api_kwargs.get("messages") or [], model)
     tools = api_kwargs.get("tools")
     tool_choice = api_kwargs.get("tool_choice")
     if tool_choice == "none":

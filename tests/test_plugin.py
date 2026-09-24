@@ -310,3 +310,31 @@ class AuthTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ImageWireFormatTests(unittest.TestCase):
+    """``/alpha`` needs ``mimeType`` on an image part, and a placeholder for text-only models.
+
+    Without ``mimeType`` the endpoint accepts the part and silently ignores the pixels — a solid
+    blue 64x64 answered "White" until the field was added.
+    """
+
+    DATA_URL = "data:image/png;base64,iVBORw0KGgo="
+
+    def _body(self, model: str):
+        return transport._request_body({
+            "model": model,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "colour?"},
+                {"type": "image_url", "image_url": {"url": self.DATA_URL}}]}],
+        }, model)
+
+    def test_image_part_carries_mime_type(self):
+        part = self._body("Qwen/Qwen3.8-Omni-Flash")["params"]["messages"][0]["content"][1]
+        self.assertEqual(part["type"], "image")
+        self.assertEqual(part["mimeType"], "image/png")
+
+    def test_text_only_model_gets_a_placeholder(self):
+        content = self._body("deepseek/deepseek-v4-pro")["params"]["messages"][0]["content"]
+        self.assertNotIn("image", [p.get("type") for p in content])
+        self.assertTrue(any("image" in str(p.get("text", "")) for p in content))
