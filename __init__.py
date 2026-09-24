@@ -1,40 +1,19 @@
-"""Command Code (commandcode.ai) provider profile for Go/free-tier accounts.
+"""Command Code (commandcode.ai) provider profile for accounts that sign in with the Command Code CLI.
 
-The provider is named ``commandcode-alpha`` after the wire it speaks — the private
-``/alpha/generate`` protocol — following upstream's product+wire convention (``commandcode``
-for the OpenAI-compatible Provider API, ``commandcode-anthropic`` for the Anthropic wire).
-``commandcode-oauth`` stays as an alias: it is the name the integration PR and its issue
-use, and what existing configs already say.
+The provider is ``commandcode-oauth``: ``oauth`` names the credential path — the sign-in the
+Command Code CLI already stores, or the studio hand-off, is what the transport authenticates with.
+``commandcode-alpha`` remains as an alias for the endpoint it speaks.
 
-Upstream ships Command Code only as *API-key* profiles against the OpenAI-compatible
-Provider API (``/provider/v1``). Accounts on the Go/free tiers have no Provider-API access
-at all: they reach models through the CLI's private ``/alpha/generate`` protocol, using the
-grant the Command Code CLI stores in ``~/.commandcode/auth.json``.
+Upstream ships Command Code as an *API-key* profile against the OpenAI-compatible Provider API
+(``/provider/v1``). Accounts that sign in through the CLI are not covered by that profile: they
+reach models through the same ``/alpha/generate`` endpoint the CLI uses.
 
-Per upstream's ruling on the integration PR — *"ship the OAuth/alpha adapter as an external
-model-provider plugin so it can track the unversioned protocol independently"* — this lives
-entirely outside the tree and touches no core file, using documented extension points:
+The integration PR for this provider was asked to ship as an external model-provider plugin, so
+everything lives outside the tree and touches no core file, using documented extension points:
 
 * :meth:`ProviderProfile.create_client` — supplies the ``/alpha`` transport
   (:mod:`transport`) instead of an HTTP client.
-* :meth:`ProviderProfile.fetch_models` — the account's live catalogue.
-* :meth:`ProviderProfile.fetch_account_usage` — credits and 5-hour/weekly windows for
-  ``hermes usage`` / ``/usage``.
-* :meth:`ProviderProfile.auth_handler` / ``refresh_credential`` — ``hermes auth
-  add|status|logout`` and pooled-row rotation (:mod:`auth`), so the plugin owns its own
-  credential story instead of relying on core plumbing.
-* :meth:`ProviderProfile.classify_api_error` — maps this endpoint's failures (notably a
-  ``402 Insufficient Balance`` delivered *inside* a 200 stream) onto Hermes failover
-  reasons (:mod:`errors`).
-
-Deliberately absent: ``get_usage_cost``. Command Code prices live at
-https://commandcode.ai/pricing and are not on the wire, so a hardcoded table would drift
-and read as an invoice; the accurate spend view is ``hermes usage`` (credits, 5-hour and
-weekly windows, billing-period total, straight from ``/alpha``) plus the per-request detail
-on the account's usage page.
-
-Install by dropping this directory into ``~/.hermes/plugins/model-providers/`` (or shipping
-it as a distribution exposing the ``hermes_agent.plugins`` entry point).
+* :meth:`ProviderProfile.fetch_models` — the account's live catalog.
 """
 
 from __future__ import annotations
@@ -56,14 +35,13 @@ from .transport import ALPHA_ORIGIN, CommandCodeAlphaClient, cli_token
 
 logger = logging.getLogger("plugins.commandcode_oauth")
 
-# Models the Go tier always has; kept in front of the live catalogue so the picker's
-# defaults are the free ones rather than whatever the relay lists last.
-FREE_FIRST_MODELS = ("meituan/LongCat-2.0:free", "poolside/laguna-s-2.1-free")
+# The vendor's zero-cost entries, kept in front of the live catalog so the picker's defaults
+# are the entries that cost nothing rather than whatever the endpoint lists last.
+ZERO_COST_MODELS = ("meituan/LongCat-2.0:free", "poolside/laguna-s-2.1-free")
 
-# Catalog snapshot for the picker: core never probes a non-api_key profile, so
-# ``provider_model_ids`` (the /model picker, the Desktop picker and `hermes model`) reads
-# this list for us — ``fetch_models`` still serves the live list to surfaces that probe
-# (the setup wizard). Refresh by pasting ``fetch_models()`` output back here.
+# Offline fallback only. The picker probes this provider live through ``fetch_models``; this
+# short list is what resolves when there is no credential or the network is down. Refresh it by
+# pasting a few ``fetch_models()`` ids here.
 FALLBACK_MODELS = (
     "meituan/LongCat-2.0:free",
     "poolside/laguna-s-2.1-free",
@@ -117,7 +95,7 @@ def _as_float(value: Any) -> Optional[float]:
 # rotation) lives in ``auth_handler`` / ``refresh_credential`` below. The static list is therefore
 # only an offline fallback, not the catalog.
 class CommandCodeOAuthProfile(ProviderProfile):
-    """Command Code Go/free tiers through the CLI's ``/alpha/generate`` protocol."""
+    """Command Code, through the same ``/alpha/generate`` endpoint the CLI uses."""
 
     def create_client(self, **client_kwargs: Any) -> Any:
         """Supply the ``/alpha`` transport instead of an OpenAI-over-HTTP client."""
@@ -126,7 +104,7 @@ class CommandCodeOAuthProfile(ProviderProfile):
     def fetch_models(
         self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
-        """The account's live catalogue, free models first.
+        """The account's live catalog, zero-cost entries first.
 
         ``None`` (not ``[]``) when the account is unreachable: the caller then falls back to
         ``fallback_models``, whereas an empty list would look like a genuinely empty account.
@@ -143,7 +121,7 @@ class CommandCodeOAuthProfile(ProviderProfile):
                     models.append(model_id.strip())
         if not models:
             return None
-        for name in reversed(FREE_FIRST_MODELS):
+        for name in reversed(ZERO_COST_MODELS):
             if name in models:
                 models.remove(name)
             models.insert(0, name)
@@ -237,7 +215,7 @@ commandcode_oauth = CommandCodeOAuthProfile(
     base_url=ALPHA_ORIGIN,
     auth_type="api_key",
     display_name="CommandCode (OAuth)",
-    description="Command Code Go/free accounts — CLI credentials over the private /alpha/generate protocol",
+    description="Command Code — CLI sign-in over the same /alpha/generate endpoint the CLI uses",
     fallback_models=FALLBACK_MODELS,
     # Provider-owned auth / classification. These three are dataclass *fields* on
     # ProviderProfile (default None), so they belong in the constructor — declaring them in

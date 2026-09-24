@@ -1,6 +1,6 @@
 """Command Code ``/alpha/generate`` transport for the ``commandcode-alpha`` provider plugin.
 
-Command Code's Go/free tiers reach models through a private NDJSON endpoint
+This provider reaches models through an NDJSON endpoint — the same one the Command Code CLI uses
 (``POST https://api.commandcode.ai/alpha/generate``) rather than the OpenAI-compatible
 Provider API under ``/provider/v1``; the official CLI and the community bridges all speak
 it, and it is what ``~/.commandcode/auth.json`` credentials are valid for.

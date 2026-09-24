@@ -1,83 +1,52 @@
-# commandcode-alpha — Hermes model-provider plugin
+# hermes-commandcode-oauth
 
-Command Code (`commandcode.ai`) accounts on the **Go / free tiers** reach models through the
-CLI's private `/alpha/generate` protocol, not through the OpenAI-compatible Provider API that
-Hermes' bundled `commandcode` profile targets. This plugin supplies that transport in-process.
+A [Hermes Agent](https://github.com/NousResearch/hermes-agent) model-provider plugin that adds
+Command Code (`commandcode.ai`) as a provider for accounts that sign in with the Command Code CLI.
 
-## Why a plugin, not a core PR
-
-[#105967](https://github.com/NousResearch/hermes-agent/issues/105967) asked for this in core and
-the maintainer ruling was:
-
-> a third-party-product integration on an undocumented protocol … our recommendation is to ship
-> it as an external model-provider plugin so it can move at Command Code's pace.
-
-[PR #105968](https://github.com/NousResearch/hermes-agent/pull/105968) is the core patch that
-this replaces. Nothing here touches Hermes core: it uses the documented provider-plugin hooks
-(`create_client`, `auth_handler`, `refresh_credential`, `fetch_models`, `fetch_account_usage`,
-`classify_api_error`) and the `HERMES_SKIP_TRANSPORT_WRAP` / `HERMES_SKIP_ASYNC_WRAP` opt-outs.
+Upstream ships Command Code as an API-key provider against the OpenAI-compatible Provider API.
+Accounts that sign in through the CLI are not covered by it; this plugin covers them, using the
+same `/alpha/generate` endpoint the CLI uses and the sign-in it already stores.
 
 ## What it provides
 
 | Hook | Behaviour |
 |---|---|
-| `create_client` | `/alpha/generate` transport behind an OpenAI-shaped facade. Honours a user-set `base_url` (proxy/self-hosted). Chunk streaming for `stream=True`, complete response otherwise. |
-| `auth_handler` | Owns `hermes auth add\|status\|logout commandcode-alpha`: imports the grant the official CLI already stores in `~/.commandcode/auth.json`, or signs in through the studio's loopback hand-off (127.0.0.1:5959), writing the grant back so CLI and Hermes share one login. |
-| `refresh_credential` | Re-reads the CLI grant for the pooled row. |
-| `fetch_models` | Live catalog from `/provider/v1/models`, with the free models surfaced first. |
-| `fetch_account_usage` | `hermes usage` / `/usage`: credits, 5-hour and weekly windows, period spend (`/alpha/whoami` → `/alpha/billing/credits` + `/alpha/usage/summary`). |
-| `classify_api_error` | 402 → `billing`, 401/403 → `auth`, 429 → `rate_limit`, 5xx → `server_error`/`overloaded`, 504 → `timeout`, 400 → `context_overflow`/`format_error`. |
+| `register_provider` | provider `commandcode-oauth` (alias `commandcode-alpha`) |
+| `create_client` | the `/alpha/generate` transport, OpenAI-shaped: sync calls, streaming chunks, and awaitable for the async auxiliary path |
+| `auth_handler`, `refresh_credential` | `hermes auth add\|status\|logout commandcode-oauth`: reuses the CLI's existing sign-in, or the studio hand-off, and keeps the credential in the pool |
+| `fetch_models` | the account's live catalog |
+| `fetch_account_usage` | plan limits: credits, 5-hour and weekly windows, current-period spend |
+| `classify_api_error` | maps endpoint failures onto Hermes' failover reasons (billing, rate limit, auth, server) |
 
-### Wire details worth knowing
+Behaviour worth knowing, all covered by tests:
 
-* `totalUsage.inputTokenDetails.cacheReadTokens` is the cached share of the prompt. It is
-  billed separately (`cacheCost` on the account's usage page) and is mapped onto
-  `prompt_tokens_details.cached_tokens`, so Hermes reports real cache hits — measured 97.7% on
-  a live call.
-* The relay can answer **HTTP 200 with an `error` event inside the stream** (e.g. 402
-  `Insufficient Balance`). That is raised as a `CommandCodeAPIError` carrying its status code,
-  so failover can classify it.
-* A stream that ends after `start` with no text and no `finish` is **failed closed** rather than
-  returned as an empty turn.
-* `tool_choice="none"` empties the tool list; a forced tool choice cannot be expressed on this
-  wire, so tools are forwarded instead of failing the turn.
+- prompt-cache usage (`cacheReadTokens`) is reported to the caller, so cache hits are visible;
+- image parts carry `mimeType` — the endpoint accepts a part without it and ignores the pixels;
+- models that do not take images get a text placeholder instead of losing the attachment;
+- an empty or truncated stream, and an in-stream `error` event, fail closed rather than returning
+  an empty success;
+- `tool_choice: "none"` empties the tool list; `temperature` is forwarded.
 
 ## Install
 
 ```bash
-# user-level (fastest loop) — the plugin overrides any same-named bundled profile
-cp -R commandcode-alpha ~/.hermes/plugins/model-providers/
-
-# or as a distribution
-#   [project.entry-points."hermes_agent.plugins"]
-#   commandcode-alpha = "hermes_commandcode_alpha:register"
+cp -r . ~/.hermes/plugins/model-providers/commandcode-oauth/   # user-level; no packaging needed
+hermes auth add commandcode-oauth    # reuses the CLI sign-in, or opens the studio hand-off
+hermes model                         # pick commandcode-oauth, then a model
 ```
 
-Then pick it like any provider (`hermes model`, or `model.provider: commandcode-oauth` — the
-alias is kept for the name the PR and existing configs use).
+## Notes
 
-## Naming
-
-Canonical name is `commandcode-alpha` (upstream's product+wire convention: `commandcode` for the
-Provider API, `commandcode-anthropic` for the Anthropic wire). `commandcode-oauth` is kept as the
-single alias because that is what the integration PR/issue and existing configs call it. If
-Command Code ever unifies the transports, fold this into `commandcode` and drop the plugin.
+- **Naming**: `oauth` names the credential path; `commandcode-alpha` is kept as an alias.
+- **`auth_type="api_key"` and `COMMANDCODE_CLI_TOKEN` are deliberate**: the model picker only
+  probes providers declared `api_key`, and the registry mirror drops an `api_key` profile that
+  declares no `env_vars`. The credential still comes from the pool (`auth_handler` fills it);
+  `COMMANDCODE_CLI_TOKEN` accepts the same bearer.
+- **`fallback_models` is an offline fallback**, not the catalog — the catalog is fetched live.
+- **Vision** travels through the same endpoint; verified against a solid-colour test image.
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v   # or: pytest tests -q
+python -m unittest discover -s tests   # stdlib only, no network (local NDJSON server)
 ```
-
-18 tests, no network: the transport is pointed at a local NDJSON server through `base_url`.
-`pool_provider` needs a Hermes tree on `sys.path`; set `HERMES_TREE` to run that case.
-
-## Deliberate omissions
-
-* **No `get_usage_cost`.** The vendor's per-model prices are not exposed on any endpoint this
-  plugin can read, and a stale hardcoded price table would be worse than none. `hermes usage`
-  (invoice-side: credits + period spend) and the account's usage page are the cost sources.
-* **No browser-less login.** `hermes auth add` needs either the CLI's grant or a browser.
-
-This is a third-party integration on an **undocumented** endpoint that Command Code may change at
-any time; it is not endorsed by Command Code or Nous Research.
