@@ -41,8 +41,8 @@ hermes auth add commandcode-oauth    # reuses the CLI sign-in, or opens the stud
 hermes model                         # pick commandcode-oauth, then a model
 ```
 
-The catalog entry (NousResearch/hermes-agent#121888) is pending review; once it lands,
-`hermes plugins search commandcode` finds it and `hermes plugins install commandcode-oauth` works.
+A catalog entry is pending review upstream; once it lands, `hermes plugins search commandcode`
+finds it and `hermes plugins install commandcode-oauth` works.
 
 ## Notes
 
