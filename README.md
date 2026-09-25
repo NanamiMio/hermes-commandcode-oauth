@@ -47,10 +47,9 @@ finds it and `hermes plugins install commandcode-oauth` works.
 ## Notes
 
 - **Naming**: `oauth` names the credential path; `commandcode-alpha` is kept as an alias.
-- **`auth_type="api_key"` and `COMMANDCODE_CLI_TOKEN` are deliberate**: the model picker only
-  probes providers declared `api_key`, and the registry mirror drops an `api_key` profile that
-  declares no `env_vars`. The credential still comes from the pool (`auth_handler` fills it);
-  `COMMANDCODE_CLI_TOKEN` accepts the same bearer.
+- **`auth_type="oauth_external"`**: truthfully represents the CLI OAuth / browser loopback sign-in.
+  With Hermes Agent upstream PR #122203, non-`api_key` providers with a custom `fetch_models()` are
+  probed live, and `COMMANDCODE_CLI_TOKEN` remains supported as an optional environment override.
 - **`fallback_models` is an offline fallback**, not the catalog — the catalog is fetched live.
 - **Vision** travels through the same endpoint; verified against a solid-colour test image.
 
