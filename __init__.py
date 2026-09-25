@@ -88,12 +88,10 @@ def _as_float(value: Any) -> Optional[float]:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-# ``auth_type="api_key"`` is deliberate: the model picker only probes providers declared that way
-# (hermes_cli/models.py: a non-api_key profile is answered from ``fallback_models`` alone). Our
-# credential *is* a bearer token used as a key — the pool row is resolved through the api_key path,
-# which reaches the same pool — while everything OAuth-shaped (the CLI grant, the studio hand-off,
-# rotation) lives in ``auth_handler`` / ``refresh_credential`` below. The static list is therefore
-# only an offline fallback, not the catalog.
+# With Hermes Agent upstream PR #122203 merged, non-api_key providers with a custom
+# `fetch_models` implementation are probed live by `_profile_live_catalog`.
+# We declare `auth_type="oauth_external"` to truthfully represent the CLI OAuth /
+# loopback token credential flow.
 class CommandCodeOAuthProfile(ProviderProfile):
     """Command Code, through the same ``/alpha/generate`` endpoint the CLI uses."""
 
@@ -207,13 +205,12 @@ commandcode_oauth = CommandCodeOAuthProfile(
     name="commandcode-oauth",
     aliases=("commandcode-alpha",),
     api_mode="chat_completions",
-    # Declared so the registry mirror accepts an api_key row at all
-    # (hermes_cli/auth_plugin_providers.register_plugin_provider drops api_key profiles with no
-    # env_vars). The pool row is the primary credential — auth_handler fills it — and this env
+    # Declared so users can optionally override the credential via an env var.
+    # The pool row is the primary credential — auth_handler fills it — and this env
     # var accepts the same bearer the Command Code CLI stores, which is what /alpha/generate wants.
     env_vars=("COMMANDCODE_CLI_TOKEN",),
     base_url=ALPHA_ORIGIN,
-    auth_type="api_key",
+    auth_type="oauth_external",
     display_name="CommandCode (OAuth)",
     description="Command Code — CLI sign-in over the same /alpha/generate endpoint the CLI uses",
     fallback_models=FALLBACK_MODELS,
