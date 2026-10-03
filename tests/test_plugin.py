@@ -338,3 +338,28 @@ class ImageWireFormatTests(unittest.TestCase):
         content = self._body("deepseek/deepseek-v4-pro")["params"]["messages"][0]["content"]
         self.assertNotIn("image", [p.get("type") for p in content])
         self.assertTrue(any("image" in str(p.get("text", "")) for p in content))
+
+
+class CallbackBindingTest(unittest.TestCase):
+    def test_busy_port_fails_fast_instead_of_binding_elsewhere(self):
+        import socket
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        port = blocker.getsockname()[1]
+        try:
+            with self.assertRaises(auth.CommandCodeAuthError) as ctx:
+                auth._start_callback_server("s", port=port)
+            self.assertIn(str(port), str(ctx.exception))
+        finally:
+            blocker.close()
+
+    def test_server_is_listening_before_the_url_is_built(self):
+        server, thread, result = auth._start_callback_server("s", port=0)
+        try:
+            host, port = server.server_address[:2]
+            import socket
+            with socket.create_connection((host, port), timeout=1):
+                pass
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=1.0)

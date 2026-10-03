@@ -176,23 +176,33 @@ def _callback_handler(expected_state: str):
     return _Handler, result
 
 
-def _wait_for_callback(state: str, *, port: int = CALLBACK_PORT, timeout: float = 120.0) -> Dict[str, Any]:
+def _start_callback_server(state: str, *, port: int = CALLBACK_PORT):
+    """Bind and serve the loopback callback BEFORE the sign-in URL is shown.
+
+    The studio page posts to the URL it is given, which always names ``port``. Falling
+    back to an ephemeral port would advertise 5959 while listening elsewhere, so the
+    hand-off could never arrive (or would reach whatever else owns 5959). A busy port is
+    therefore an immediate, actionable error.
+    """
     handler_cls, result = _callback_handler(state)
 
     class _Server(HTTPServer):
         allow_reuse_address = True
 
-    server: Optional[HTTPServer] = None
     try:
         server = _Server(("127.0.0.1", port), handler_cls)
-    except OSError:
-        # 5959 busy: the studio page is told the callback URL, so an ephemeral port is fine.
-        try:
-            server = _Server(("127.0.0.1", 0), handler_cls)
-        except OSError as exc:
-            raise CommandCodeAuthError(f"Could not bind the Command Code callback server: {exc}") from exc
+    except OSError as exc:
+        raise CommandCodeAuthError(
+            f"Port {port} is in use, so the Command Code sign-in callback cannot be received. "
+            f"Close the process listening on 127.0.0.1:{port} (often another `cmd login`) and retry, "
+            "or sign in with the Command Code CLI first so its grant can be imported."
+        ) from exc
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
     thread.start()
+    return server, thread, result
+
+
+def _wait_for_callback(server, thread, result, *, timeout: float = 120.0) -> Dict[str, Any]:
     deadline = time.monotonic() + max(5.0, timeout)
     try:
         while time.monotonic() < deadline:
@@ -220,6 +230,8 @@ def login(*, open_browser: bool = True, timeout: float = 120.0) -> Dict[str, Any
         logger.debug("CLI grant unusable, falling back to browser: %s", exc)
 
     state = secrets.token_urlsafe(32)
+    # Listen first: the URL below names CALLBACK_PORT, so it must already be ours.
+    server, thread, result = _start_callback_server(state)
     callback = f"http://127.0.0.1:{CALLBACK_PORT}/callback"
     auth_url = f"{STUDIO_URL}/studio/auth/cli?callback={callback}&state={state}"
     print("Sign in with Command Code in your browser:")
@@ -232,7 +244,7 @@ def login(*, open_browser: bool = True, timeout: float = 120.0) -> Dict[str, Any
             webbrowser.open(auth_url)
         except Exception:
             logger.debug("could not open a browser; paste the URL above")
-    payload = _wait_for_callback(state, timeout=timeout)
+    payload = _wait_for_callback(server, thread, result, timeout=timeout)
     token = str(payload["apiKey"]).strip()
     user_id = str(payload.get("userId") or "")
     user_name = str(payload.get("userName") or "")
