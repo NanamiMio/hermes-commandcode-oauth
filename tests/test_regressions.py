@@ -20,6 +20,15 @@ import errors
 import transport
 
 
+class ModelRetirementTest(unittest.TestCase):
+    def test_retired_tier_is_model_scoped_even_when_status_is_forbidden(self):
+        exc = transport.CommandCodeAPIError(
+            "The free LongCat 2.0 tier has been retired. LongCat 2.0 is now a paid model", status_code=403)
+        self.assertEqual(errors.classify_api_error(exc), {"reason": "model_not_found"})
+        self.assertEqual(errors.classify_api_error(transport.CommandCodeAPIError(
+            "Account access forbidden", status_code=403)), {"reason": "auth"})
+
+
 class TransportRegressionTest(unittest.TestCase):
     setUpClass = classmethod(fixtures.PluginTestCase.setUpClass.__func__)
     tearDownClass = classmethod(fixtures.PluginTestCase.tearDownClass.__func__)
@@ -186,6 +195,16 @@ class ProfileRegressionTest(unittest.TestCase):
     def setUpClass(cls):
         cls.module = fixtures.load_profile()
         cls.profile = cls.module.commandcode_oauth
+
+    def test_live_catalog_does_not_invent_absent_free_models(self):
+        with patch.object(self.module, "_http_json", return_value={"data": [{"id": "vendor/current"}]}):
+            self.assertEqual(self.profile.fetch_models(api_key="fixture-token"), ["vendor/current"])
+
+    def test_free_preference_only_reorders_models_returned_by_server(self):
+        ids = ["vendor/current", "poolside/laguna-s-2.1-free"]
+        with patch.object(self.module, "_http_json", return_value={"data": [{"id": m} for m in ids]}):
+            self.assertEqual(self.profile.fetch_models(api_key="fixture-token"), list(reversed(ids)))
+        self.assertNotIn("meituan/LongCat-2.0:free", self.profile.fallback_models)
 
     def test_setup_and_discovery_work_with_pool_only_credentials(self):
         with patch.dict("os.environ", {"COMMANDCODE_CLI_TOKEN": ""}), \

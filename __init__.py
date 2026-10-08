@@ -39,12 +39,11 @@ logger = logging.getLogger("plugins.commandcode_oauth")
 
 # The vendor's zero-cost entries, kept in front of the live catalog so the picker's defaults
 # are the entries that cost nothing rather than whatever the endpoint lists last.
-ZERO_COST_MODELS = ("meituan/LongCat-2.0:free", "poolside/laguna-s-2.1-free")
+ZERO_COST_MODELS = ("poolside/laguna-s-2.1-free",)
 
 # Setup probes the account through ``fetch_models``. Pickers whose core still gates live
 # probing on api_key profiles also use this fallback (see the README's compatibility note).
 FALLBACK_MODELS = (
-    "meituan/LongCat-2.0:free",
     "poolside/laguna-s-2.1-free",
     "deepseek/deepseek-v4.1-flash",
     "deepseek/deepseek-v4-pro",
@@ -153,7 +152,7 @@ class CommandCodeOAuthProfile(ProviderProfile):
         for name in reversed(ZERO_COST_MODELS):
             if name in models:
                 models.remove(name)
-            models.insert(0, name)
+                models.insert(0, name)
         return models
 
     def fetch_account_usage(self, *, base_url: str | None = None, api_key: str | None = None):

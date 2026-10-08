@@ -70,6 +70,8 @@ finds it and `hermes plugins install commandcode-oauth` works.
   port (5959) fails immediately with instructions; the listener is bound before the URL is shown
   and closes after success, failure, timeout or cancellation.
 - **`fallback_models` is an offline fallback**, not the catalog — the catalog is fetched live.
+  Live discovery only reorders models returned by the service; it never inserts absent free
+  tiers. The retired `meituan/LongCat-2.0:free` SKU is excluded from the offline fallback.
 - **Vision** travels through the same endpoint; verified against a solid-colour test image.
 
 ## Disclosure
@@ -93,3 +95,11 @@ HERMES_TREE=/path/to/hermes-agent HERMES_HOME=/path/to/temporary-test-home \
 
 Hermes integration tests need its normal runtime dependencies. All provider traffic in the suite
 is mocked or served by a local fixture; the tests do not contact a live Command Code account.
+
+Separately verified on October 8, 2026 with a real CLI credential and Hermes main `08165d5`:
+login import, live catalog, billing windows, a full Agent turn, sync and streaming chat, tool calls and results,
+sync compression and async titling through Hermes' auxiliary router, and vision using a generated
+blue PNG. DeepSeek V4.1 Flash handled text/tools and Qwen3.8 Omni Flash handled the image. The CLI
+credential file remained unchanged. A live 403 for the retired LongCat free tier is classified as
+a model failure rather than a credential failure.
+Laguna S 2.1 Free also returned a valid reply after an initial provider-capacity error.

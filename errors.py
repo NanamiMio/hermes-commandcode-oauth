@@ -49,6 +49,10 @@ def classify_api_error(
     if code == 401:
         return {"reason": "auth"}
     if code == 403:
+        # A retired model can return FORBIDDEN even with a valid account key.
+        # Treat it as model-scoped so Hermes does not cool down the credential.
+        if "has been retired" in text and ("model" in text or "tier" in text):
+            return {"reason": "model_not_found"}
         # The alpha endpoint answers 403 when a credential has no access to the requested
         # model/route; the key itself may be fine, but from here it is an auth-shaped stop.
         return {"reason": "auth"}
