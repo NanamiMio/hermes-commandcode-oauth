@@ -1,4 +1,4 @@
-"""Command Code credential handling for the ``commandcode-alpha`` provider plugin.
+"""Command Code credential handling for the ``commandcode-oauth`` provider plugin.
 
 Two ways in, both ending as a pooled OAuth row:
 
@@ -7,8 +7,8 @@ Two ways in, both ending as a pooled OAuth row:
    logged in. This is the same file the official CLI and every community bridge read.
 2. **Loopback hand-off**: open
    ``https://commandcode.ai/studio/auth/cli?callback=…&state=…`` and catch the JSON
-   ``POST`` the studio page makes to ``127.0.0.1:5959/callback``. The grant is written
-   back to ``~/.commandcode/auth.json`` so the CLI and Hermes share one login.
+   ``POST`` the studio page makes to the loopback callback. The key is stored only
+   in Hermes' credential pool; the vendor CLI's credential file is read-only.
 
 Per ``providers/base.py`` a non-api-key plugin owns its own auth: ``auth_handler``
 serves ``hermes auth add|status|logout <name>`` and ``refresh_credential`` rotates a
@@ -28,7 +28,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 logger = logging.getLogger("plugins.commandcode_oauth.auth")
 
@@ -67,7 +67,7 @@ def read_cli_token() -> str:
     if not CLI_AUTH_PATH.exists():
         raise CommandCodeAuthError(
             f"Command Code CLI credentials not found at {CLI_AUTH_PATH}. "
-            "Run `hermes auth add commandcode-alpha` to sign in."
+            "Run `hermes auth add commandcode-oauth` to sign in."
         )
     try:
         data = json.loads(CLI_AUTH_PATH.read_text(encoding="utf-8"))
@@ -79,26 +79,6 @@ def read_cli_token() -> str:
     if not token:
         raise CommandCodeAuthError(f"{CLI_AUTH_PATH} has no apiKey.")
     return token
-
-
-def write_cli_token(token: str, *, user_id: str = "", user_name: str = "", key_name: str = "hermes-plugin") -> None:
-    """Atomically write the grant back so the CLI and Hermes share one login (0600)."""
-    payload = {
-        "apiKey": token,
-        "userId": user_id,
-        "userName": user_name,
-        "keyName": key_name,
-        "authenticatedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-    }
-    CLI_AUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CLI_AUTH_PATH.with_suffix(f".tmp-{os.getpid()}")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
-        os.replace(tmp, CLI_AUTH_PATH)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def validate(token: str, *, timeout: float = 10.0) -> Optional[Dict[str, str]]:
@@ -202,57 +182,54 @@ def _start_callback_server(state: str, *, port: int = CALLBACK_PORT):
     return server, thread, result
 
 
-def _wait_for_callback(server, thread, result, *, timeout: float = 120.0) -> Dict[str, Any]:
-    deadline = time.monotonic() + max(5.0, timeout)
-    try:
-        while time.monotonic() < deadline:
-            if result["payload"] or result["error"]:
-                if result["error"]:
-                    raise CommandCodeAuthError(f"Command Code sign-in failed: {result['error']}")
-                return result["payload"]
-            time.sleep(0.1)
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=1.0)
+def _wait_for_callback(result, *, timeout: float = 120.0) -> Dict[str, Any]:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        if result["payload"] or result["error"]:
+            if result["error"]:
+                raise CommandCodeAuthError(f"Command Code sign-in failed: {result['error']}")
+            return result["payload"]
+        time.sleep(0.1)
     raise CommandCodeAuthError("Timed out waiting for the browser sign-in callback.")
 
 
 def login(*, open_browser: bool = True, timeout: float = 120.0) -> Dict[str, Any]:
     """Import the CLI's grant, or fall back to the studio's loopback hand-off."""
     try:
-        token = read_cli_token()
+        env_token = os.environ.get("COMMANDCODE_CLI_TOKEN", "").strip()
+        token = env_token or read_cli_token()
         identity = validate(token)
         if identity is not None:
             logger.debug("using the Command Code CLI grant for %s", identity.get("user_name") or "user")
-            return {"token": token, "source": "commandcode-cli", **identity}
+            return {"token": token, "source": "commandcode-env" if env_token else "commandcode-cli", **identity}
     except CommandCodeAuthError as exc:
         logger.debug("CLI grant unusable, falling back to browser: %s", exc)
 
     state = secrets.token_urlsafe(32)
-    # Listen first: the URL below names CALLBACK_PORT, so it must already be ours.
+    # Own the listener before advertising any address to the browser.
     server, thread, result = _start_callback_server(state)
-    callback = f"http://127.0.0.1:{CALLBACK_PORT}/callback"
-    auth_url = f"{STUDIO_URL}/studio/auth/cli?callback={callback}&state={state}"
-    print("Sign in with Command Code in your browser:")
-    print(f"  {auth_url}\n")
-    print("Waiting for the sign-in callback…")
-    if open_browser:
-        try:
-            import webbrowser
+    try:
+        host, port = server.server_address[:2]
+        callback = f"http://{host}:{port}/callback"
+        auth_url = f"{STUDIO_URL}/studio/auth/cli?{urlencode({'callback': callback, 'state': state})}"
+        print("Sign in with Command Code in your browser:")
+        print(f"  {auth_url}\n")
+        print("Waiting for the sign-in callback…")
+        if open_browser:
+            try:
+                import webbrowser
 
-            webbrowser.open(auth_url)
-        except Exception:
-            logger.debug("could not open a browser; paste the URL above")
-    payload = _wait_for_callback(server, thread, result, timeout=timeout)
+                webbrowser.open(auth_url)
+            except Exception:
+                logger.debug("could not open a browser; paste the URL above")
+        payload = _wait_for_callback(result, timeout=timeout)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1.0)
     token = str(payload["apiKey"]).strip()
     user_id = str(payload.get("userId") or "")
     user_name = str(payload.get("userName") or "")
-    try:
-        write_cli_token(token, user_id=user_id, user_name=user_name,
-                        key_name=str(payload.get("keyName") or "hermes-plugin"))
-    except Exception as exc:  # the pool row still matters more than the shared file
-        logger.debug("could not write %s back: %s", CLI_AUTH_PATH, exc)
     return {"token": token, "source": "commandcode-studio", "user_id": user_id, "user_name": user_name}
 
 
@@ -313,17 +290,25 @@ def auth_handler(action: str, args: Any) -> bool:
 
 
 def refresh_credential(entry: Any) -> Mapping[str, Any]:
-    """Re-read the CLI's grant for a pooled row.
+    """Re-import a CLI key, or revalidate the pool's browser key without a CLI file.
 
-    There is no refresh_token grant to spend: the CLI file is the source of truth, so a
-    rotation is "the file changed". Returning the same token is a successful no-op, which
-    keeps the pool from parking a row that is in fact still valid.
+    These are static keys, with no OAuth refresh exchange. A studio hand-off must
+    never be replaced by an unrelated key from the vendor's CLI store.
     """
-    token = read_cli_token()
+    token = str(getattr(entry, "access_token", "") or "").strip()
+    source = (getattr(entry, "extra", {}) or {}).get("commandcode", {}).get("source")
+    if source == "commandcode-env":
+        token = os.environ.get("COMMANDCODE_CLI_TOKEN", "").strip() or token
+    elif source != "commandcode-studio":
+        try:
+            token = read_cli_token()
+        except CommandCodeAuthError:
+            if not token:
+                raise
     identity = validate(token)
     if identity is None:
         raise CommandCodeAuthError(
-            "Command Code rejected the stored credential; run `hermes auth add commandcode-alpha` again."
+            "Command Code rejected the stored credential; run `hermes auth add commandcode-oauth` again."
         )
     return {
         "access_token": token,

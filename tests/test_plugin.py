@@ -17,6 +17,7 @@ skipped.
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import sys
 import threading
@@ -34,13 +35,25 @@ import transport  # noqa: E402
 
 HERMES_TREE = os.environ.get("HERMES_TREE", str(Path.home() / ".hermes" / "hermes-agent"))
 if HERMES_TREE and Path(HERMES_TREE).is_dir() and HERMES_TREE not in sys.path:
-    sys.path.append(HERMES_TREE)
+    sys.path.insert(0, HERMES_TREE)
 try:  # pragma: no cover - depends on the environment
     import providers  # noqa: F401
 
     HAS_HERMES_TREE = True
 except Exception:  # pragma: no cover
     HAS_HERMES_TREE = False
+
+
+def load_profile():
+    """Import the real plugin package so registry and relative imports match installation."""
+    name = "commandcode_review_plugin"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, PLUGIN_DIR / "__init__.py",
+                                                    submodule_search_locations=[str(PLUGIN_DIR)])
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
 
 
 def _line(**event) -> bytes:
@@ -281,6 +294,11 @@ class ErrorClassificationTest(unittest.TestCase):
 
 
 class AuthTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if HAS_HERMES_TREE:
+            load_profile()
+
     @unittest.skipUnless(HAS_HERMES_TREE, "needs a Hermes tree on sys.path (providers)")
     def test_pool_provider_canonicalises_aliases(self):
         for requested in ("commandcode-alpha", "commandcode-oauth", "COMMANDCODE-ALPHA"):

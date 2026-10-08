@@ -1,7 +1,7 @@
 """Command Code (commandcode.ai) provider profile for accounts that sign in with the Command Code CLI.
 
-The provider is ``commandcode-oauth``: ``oauth`` names the credential path — the sign-in the
-Command Code CLI already stores, or the studio hand-off, is what the transport authenticates with.
+The provider is ``commandcode-oauth`` (a historical name): a static key from the CLI's
+credential file or studio hand-off authenticates requests; there is no OAuth exchange.
 ``commandcode-alpha`` remains as an alias for the endpoint it speaks.
 
 Upstream ships Command Code as an *API-key* profile against the OpenAI-compatible Provider API
@@ -21,6 +21,8 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
+import time
 import urllib.parse
 import urllib.request
 from types import SimpleNamespace
@@ -29,9 +31,9 @@ from typing import Any, Dict, List, Optional
 from providers import register_provider
 from providers.base import ProviderProfile
 
-from .auth import auth_handler, refresh_credential
+from .auth import CommandCodeAuthError, auth_handler, read_cli_token, refresh_credential, validate
 from .errors import classify_api_error
-from .transport import ALPHA_ORIGIN, CommandCodeAlphaClient, cli_token
+from .transport import ALPHA_ORIGIN, CommandCodeAlphaClient
 
 logger = logging.getLogger("plugins.commandcode_oauth")
 
@@ -39,9 +41,8 @@ logger = logging.getLogger("plugins.commandcode_oauth")
 # are the entries that cost nothing rather than whatever the endpoint lists last.
 ZERO_COST_MODELS = ("meituan/LongCat-2.0:free", "poolside/laguna-s-2.1-free")
 
-# Offline fallback only. The picker probes this provider live through ``fetch_models``; this
-# short list is what resolves when there is no credential or the network is down. Refresh it by
-# pasting a few ``fetch_models()`` ids here.
+# Setup probes the account through ``fetch_models``. Pickers whose core still gates live
+# probing on api_key profiles also use this fallback (see the README's compatibility note).
 FALLBACK_MODELS = (
     "meituan/LongCat-2.0:free",
     "poolside/laguna-s-2.1-free",
@@ -62,7 +63,7 @@ _PROVIDER_PATH_MARKER = "/provider/v1"
 
 def _api_origin(base_url: Optional[str]) -> str:
     raw = (base_url or "").strip().rstrip("/")
-    if not raw or _PROVIDER_PATH_MARKER in raw:
+    if not raw:
         raw = ALPHA_ORIGIN
     parsed = urllib.parse.urlsplit(raw)
     if parsed.scheme and parsed.netloc:
@@ -88,16 +89,46 @@ def _as_float(value: Any) -> Optional[float]:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-# With Hermes Agent upstream PR #122203 merged, non-api_key providers with a custom
-# `fetch_models` implementation are probed live by `_profile_live_catalog`.
-# We declare `auth_type="oauth_external"` to truthfully represent the CLI OAuth /
-# loopback token credential flow.
 class CommandCodeOAuthProfile(ProviderProfile):
     """Command Code, through the same ``/alpha/generate`` endpoint the CLI uses."""
 
     def create_client(self, **client_kwargs: Any) -> Any:
         """Supply the ``/alpha`` transport instead of an OpenAI-over-HTTP client."""
         return CommandCodeAlphaClient(**client_kwargs)
+
+    def _credential(self, api_key: str | None = None) -> str:
+        """Resolve an explicit key, env override, Hermes pool, then the read-only CLI file."""
+        token = (api_key or os.environ.get("COMMANDCODE_CLI_TOKEN") or "").strip()
+        if token:
+            return token
+        from hermes_cli.auth import read_credential_pool
+
+        for entry in read_credential_pool(self.name):
+            if entry.get("last_status") == "dead":
+                continue
+            token = str(entry.get("access_token") or "").strip()
+            if token:
+                return token
+        try:
+            return read_cli_token()
+        except CommandCodeAuthError:
+            return ""
+
+    def setup_status(self, **kwargs: Any) -> dict[str, Any]:
+        token = self._credential(kwargs.get("api_key"))
+        identity = validate(token) if token else None
+        return {
+            "available": True,
+            "logged_in": identity is not None,
+            "detail": ("Command Code credentials verified." if identity is not None else
+                       "Run `hermes auth add commandcode-oauth` to import the CLI key or sign in with your browser."),
+            "login_command": ["hermes", "auth", "add", "commandcode-oauth"],
+        }
+
+    def discover_models(self, **kwargs: Any) -> list[dict[str, Any]] | None:
+        models = self.fetch_models(api_key=kwargs.get("api_key"), base_url=kwargs.get("base_url"),
+                                   timeout=kwargs.get("timeout", 8.0))
+        return [{"id": model, "label": model} for model in models] if models is not None else None
 
     def fetch_models(
         self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
@@ -107,7 +138,7 @@ class CommandCodeOAuthProfile(ProviderProfile):
         ``None`` (not ``[]``) when the account is unreachable: the caller then falls back to
         ``fallback_models``, whereas an empty list would look like a genuinely empty account.
         """
-        token = (api_key or "").strip() or cli_token()
+        token = self._credential(api_key)
         if not token:
             return None
         payload = _http_json(f"{_api_origin(base_url)}{_PROVIDER_PATH_MARKER}/models", token, timeout=timeout)
@@ -132,12 +163,18 @@ class CommandCodeOAuthProfile(ProviderProfile):
         accepts the CLI/OAuth token — the Provider API under ``/provider/v1`` does not.
         ``orgId`` (from ``/alpha/whoami``) is passed when discoverable, as the CLI does.
         """
-        token = (api_key or "").strip() or cli_token()
+        token = self._credential(api_key)
         if not token:
             return None
         origin = _api_origin(base_url)
+        deadline = time.monotonic() + 10.0
+
+        def get(path: str):
+            remaining = deadline - time.monotonic()
+            return _http_json(f"{origin}{path}", token, timeout=min(4.0, remaining)) if remaining > 0 else None
+
         org_id = ""
-        whoami = _http_json(f"{origin}/alpha/whoami", token, timeout=4.0)
+        whoami = get("/alpha/whoami")
         if isinstance(whoami, dict):
             for key in ("organizationId", "orgId", "organization_id"):
                 value = whoami.get(key)
@@ -145,10 +182,10 @@ class CommandCodeOAuthProfile(ProviderProfile):
                     org_id = value.strip()
                     break
         suffix = f"?orgId={urllib.parse.quote(org_id)}" if org_id else ""
-        credits_payload = _http_json(f"{origin}/alpha/billing/credits{suffix}", token, timeout=4.0)
+        credits_payload = get(f"/alpha/billing/credits{suffix}")
         if not isinstance(credits_payload, dict):
             return None
-        summary = _http_json(f"{origin}/alpha/usage/summary{suffix}", token, timeout=4.0)
+        summary = get(f"/alpha/usage/summary{suffix}")
 
         windows = []
         details = []
@@ -197,9 +234,7 @@ class CommandCodeOAuthProfile(ProviderProfile):
 
 
 commandcode_oauth = CommandCodeOAuthProfile(
-    # Named after the wire, like upstream's other Command Code profiles; ``commandcode-oauth``
-    # is the alias because that is what the integration PR/issue call it and what existing
-    # configs (``model.provider``) already say — so nothing has to be migrated.
+    # Keep the canonical provider name used by auth commands and existing configs.
     # Deliberately NOT aliased to "command-code": that token is the model-id vendor prefix
     # ("command-code/<model>") and would read as a provider name here.
     name="commandcode-oauth",

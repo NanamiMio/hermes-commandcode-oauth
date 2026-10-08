@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import datetime
 import json
+import mimetypes
 import re
 import logging
 import os
@@ -141,13 +142,22 @@ def _image_mime(url: str) -> str:
 def _media_url(part: Dict[str, Any]) -> tuple[str, str]:
     """``(kind, url)`` for any shape a caller sends — flat ``image``, OpenAI's nested
     ``image_url``, or an Anthropic ``source`` block."""
-    kind = "video" if "video" in str(part.get("type", "")) else "image"
+    part_type = str(part.get("type", ""))
+    if part_type not in ("image", "image_url", "video", "video_url"):
+        return part_type or "attachment", ""
+    kind = "video" if "video" in part_type else "image"
     url = part.get(kind)
     if isinstance(url, dict):
         url = url.get("url")
     if not isinstance(url, str) or not url:
         nested = part.get(f"{kind}_url")
         url = nested.get("url") if isinstance(nested, dict) else nested if isinstance(nested, str) else ""
+    source = part.get("source")
+    if not url and isinstance(source, dict):
+        if source.get("type") == "base64" and source.get("media_type") and source.get("data"):
+            url = f"data:{source['media_type']};base64,{source['data']}"
+        elif source.get("type") == "url":
+            url = source.get("url")
     return kind, url if isinstance(url, str) else ""
 
 
@@ -161,17 +171,19 @@ def _image_placeholder(part: Dict[str, Any]) -> str:
 def _normalize_media_part(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """One non-text content part → the wire shape (``{"type": "image", "image": url}``).
 
-    OpenAI's nested ``{"image_url": {"url": ...}}`` is rejected (400 "expected string,
-    received array"); Anthropic-shaped ``{"source": {...}}`` is accepted verbatim.
+    Flatten OpenAI URLs and Anthropic source blocks with an explicit MIME type.
     """
     kind, url = _media_url(part)
     if isinstance(url, str) and url:
         # ``mimeType`` is what makes the endpoint actually *process* the pixels: the same part
         # without it is accepted and silently ignored (verified against a solid-colour image).
-        mime = _image_mime(url)
+        source = part.get("source") or {}
+        nested = part.get(f"{kind}_url") or {}
+        mime = (_image_mime(url) or part.get("mimeType") or part.get("mime_type")
+                or (source.get("media_type") if isinstance(source, dict) else "")
+                or (nested.get("mimeType") if isinstance(nested, dict) else "")
+                or mimetypes.guess_type(urllib.parse.urlsplit(url).path)[0])
         return {"type": kind, kind: url, "mimeType": mime} if mime else None
-    if isinstance(part.get("source"), dict):
-        return part
     return None
 
 
@@ -288,7 +300,7 @@ def workspace_config(cwd: Optional[str] = None) -> Dict[str, Any]:
 
 
 def _token_from_kwargs(api_key: Optional[str]) -> str:
-    return (api_key or "").strip() or cli_token()
+    return (api_key or os.environ.get("COMMANDCODE_CLI_TOKEN") or "").strip() or cli_token()
 
 
 def _request_body(api_kwargs: Dict[str, Any], model: str) -> Dict[str, Any]:
@@ -313,7 +325,7 @@ def _request_body(api_kwargs: Dict[str, Any], model: str) -> Dict[str, Any]:
         "stream": True,
     }
     temperature = api_kwargs.get("temperature")
-    if isinstance(temperature, (int, float)):
+    if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
         params["temperature"] = temperature
 
     return {
@@ -408,7 +420,7 @@ def _iter_events(resp) -> Iterator[Dict[str, Any]]:
         yield event
 
 
-def _usage_from_event(event: Dict[str, Any]) -> Optional[SimpleNamespace]:
+def _usage_from_event(event: Dict[str, Any], previous: Optional[SimpleNamespace] = None) -> Optional[SimpleNamespace]:
     """Map the wire's ``totalUsage`` onto an OpenAI-shaped usage object (cache included).
 
     ``inputTokens`` is the whole prompt; the cached share rides in
@@ -416,13 +428,15 @@ def _usage_from_event(event: Dict[str, Any]) -> Optional[SimpleNamespace]:
     """
     raw = event.get("totalUsage") or event.get("usage") or {}
     if not isinstance(raw, dict) or not raw:
-        return None
-    in_tok = raw.get("inputTokens") or raw.get("prompt_tokens") or 0
-    out_tok = raw.get("outputTokens") or raw.get("completion_tokens") or 0
+        return previous
+    in_tok = raw.get("inputTokens", raw.get("prompt_tokens", getattr(previous, "prompt_tokens", 0)))
+    out_tok = raw.get("outputTokens", raw.get("completion_tokens", getattr(previous, "completion_tokens", 0)))
     usage = SimpleNamespace(prompt_tokens=in_tok, completion_tokens=out_tok, total_tokens=in_tok + out_tok)
     details = raw.get("inputTokenDetails") or {}
-    cache_read = details.get("cacheReadTokens") or raw.get("cacheReadTokens") or raw.get("cachedInputTokens") or 0
-    cache_write = details.get("cacheWriteTokens") or raw.get("cacheWriteTokens") or 0
+    old_details = getattr(previous, "prompt_tokens_details", None)
+    cache_read = details.get("cacheReadTokens", raw.get("cacheReadTokens", raw.get(
+        "cachedInputTokens", getattr(old_details, "cached_tokens", 0))))
+    cache_write = details.get("cacheWriteTokens", raw.get("cacheWriteTokens", getattr(old_details, "cache_write_tokens", 0)))
     if cache_read or cache_write:
         usage.prompt_tokens_details = SimpleNamespace(cached_tokens=cache_read, cache_write_tokens=cache_write)
     return usage
@@ -552,6 +566,7 @@ class CommandCodeAlphaClient:
         started = False
         finished = False
         tool_calls: List[Any] = []
+        usage = None
         with _open_stream(self._generate_url, body, token, timeout) as resp:
             for event in _iter_events(resp):
                 ev_type = event.get("type")
@@ -576,8 +591,12 @@ class CommandCodeAlphaClient:
                     ))
                     yield _chunk(response_id, model, tool_calls=[tool_calls[-1]])
                 elif ev_type in ("finish", "finish-step"):
-                    finished = True
-                    usage = _usage_from_event(event)
+                    finished = ev_type == "finish"
+                    usage = _usage_from_event(event, usage)
+                    if not finished:
+                        continue
+                    if not started:
+                        raise CommandCodeAPIError("Command Code returned an empty stream", status_code=502)
                     reason = "tool_calls" if tool_calls else (event.get("finishReason") or "stop")
                     if usage is not None:
                         yield _chunk(response_id, model, finish_reason=reason, usage=usage)
@@ -587,7 +606,8 @@ class CommandCodeAlphaClient:
             # "200 OK" whose stream stopped early: an empty turn is worse than an error.
             raise CommandCodeAPIError(
                 "Command Code returned an empty/incomplete stream"
-                f" (started={started}, finished={finished}, tools={len(tool_calls)})"
+                f" (started={started}, finished={finished}, tools={len(tool_calls)})",
+                status_code=502,
             )
 
     def _complete(self, api_kwargs: Dict[str, Any]) -> SimpleNamespace:
@@ -623,14 +643,15 @@ class CommandCodeAlphaClient:
                     ))
                     finish_reason = "tool_calls"
                 elif ev_type in ("finish", "finish-step"):
-                    finished = True
-                    usage = _usage_from_event(event) or usage
+                    finished = ev_type == "finish"
+                    usage = _usage_from_event(event, usage)
                     if not tool_calls and event.get("finishReason"):
                         finish_reason = event["finishReason"]
         if not started or not finished:
             raise CommandCodeAPIError(
                 "Command Code returned an empty/incomplete stream"
-                f" (started={started}, finished={finished}, tools={len(tool_calls)})"
+                f" (started={started}, finished={finished}, tools={len(tool_calls)})",
+                status_code=502,
             )
         return _response(
             response_id, model,

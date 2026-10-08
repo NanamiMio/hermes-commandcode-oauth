@@ -1,6 +1,7 @@
 name: commandcode-oauth
 kind: model-provider
-version: 0.1.0
+version: 0.1.1
+requires_hermes: ">=0.21.5"
 description: Command Code (commandcode.ai) as a model provider for accounts that sign in with the Command Code CLI — same endpoint and sign-in the CLI uses, through documented plugin seams only.
 author: NanamiMio
 optional_env:
