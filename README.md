@@ -30,12 +30,10 @@ Behaviour worth knowing, all covered by tests:
 
 ## Install
 
-Use a Hermes checkout containing the generic plugin OAuth auxiliary routing fix
-[`f12e6b66`](https://github.com/NousResearch/hermes-agent/commit/f12e6b66d960a92d9d4779cfcc628ab9cb02555b)
-(merged on October 6, 2026), or a later release that includes it. The September 24 release
-predates this fix: declaring `oauth_external` there makes title generation, compression and
-vision routing unavailable even though main chat works. This plugin extends the current core
-through its provider hooks; it does not patch older cores.
+The plugin currently declares `auth_type="api_key"` for compatibility with Hermes' live model
+picker. Authentication still imports the Command Code CLI's static key or receives one through
+the browser hand-off; inference still uses `/alpha/generate` through the plugin's own client.
+This declaration does not switch requests to the vendor's Provider API.
 
 ```bash
 # straight from the repository
@@ -57,14 +55,15 @@ finds it and `hermes plugins install commandcode-oauth` works.
 - **Naming**: `commandcode-oauth` is the historical name; `commandcode-alpha` is kept as an alias.
   There is no OAuth exchange or refresh grant: authentication imports a static API key from the
   CLI file or receives one through the browser hand-off.
-- **Setup**: `auth_type="oauth_external"` uses Hermes' generic login gate instead of prompting
-  for an API key in `hermes model`. Run `hermes auth add commandcode-oauth` first; the model setup
-  flow then fetches the live account catalog. `COMMANDCODE_CLI_TOKEN` is an optional key override
-  that the auth command can import into the Hermes pool.
-- **Picker compatibility**: on Hermes releases that probe live catalogs only for `api_key`
-  profiles, `/model` and the Desktop picker use `fallback_models`; the `hermes model` setup flow
-  still fetches live models. [Upstream PR #122203](https://github.com/NousResearch/hermes-agent/pull/122203)
-  extends live probing to non-`api_key` profiles and is currently pending.
+- **Setup**: run `hermes auth add commandcode-oauth` first. The provider's own auth handler
+  imports the CLI key or opens the browser and saves the credential in Hermes' pool.
+  `COMMANDCODE_CLI_TOKEN` remains an optional key override.
+- **Picker compatibility**: keep `auth_type="api_key"` while
+  [upstream PR #122203](https://github.com/NousResearch/hermes-agent/pull/122203) is pending,
+  so `/model` and the Desktop picker can fetch live models on upstream Hermes.
+  Switch to `oauth_external` only after a supported Hermes release includes both that picker
+  change and the generic plugin OAuth auxiliary routing fix
+  [`f12e6b66`](https://github.com/NousResearch/hermes-agent/commit/f12e6b66d960a92d9d4779cfcc628ab9cb02555b).
 - **Credentials**: the plugin only reads `~/.commandcode/auth.json`; it never writes or refreshes
   the vendor CLI's store. Browser keys are saved only in Hermes' credential pool. A busy callback
   port (5959) fails immediately with instructions; the listener is bound before the URL is shown

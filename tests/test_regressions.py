@@ -262,6 +262,24 @@ class ProfileRegressionTest(unittest.TestCase):
         self.assertEqual(model, "vision/model")
         self.assertEqual(client._generate_url, "http://127.0.0.1:9999/alpha/generate")
 
+    def test_api_key_picker_uses_imported_browser_credential(self):
+        from hermes_cli.auth import resolve_api_key_provider_credentials
+        from hermes_cli.models import _profile_live_catalog
+
+        package_auth = self.module.auth
+        with tempfile.TemporaryDirectory() as root, patch.dict("os.environ", {
+            "HERMES_HOME": root, "COMMANDCODE_CLI_TOKEN": ""}), \
+                patch.object(package_auth, "login", return_value={
+                    "token": "browser-token", "source": "commandcode-studio"}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.profile.auth_handler("add", SimpleNamespace(provider=self.profile.name))
+            creds = resolve_api_key_provider_credentials(self.profile.name)
+            self.assertEqual(creds["api_key"], "browser-token")
+            with patch.object(self.module, "_http_json", return_value={
+                    "data": [{"id": "fixture/live-model"}]}) as get:
+                self.assertIn("fixture/live-model", _profile_live_catalog(self.profile.name))
+            self.assertEqual(get.call_args.args[1], "browser-token")
+
     def test_models_and_usage_honour_proxy_provider_api_origin(self):
         with patch.object(self.module, "_http_json", return_value={"data": [{"id": "vision/model"}]}) as get:
             self.profile.fetch_models(api_key="fixture-token", base_url="http://127.0.0.1:9999/provider/v1")

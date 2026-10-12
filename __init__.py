@@ -239,12 +239,12 @@ commandcode_oauth = CommandCodeOAuthProfile(
     name="commandcode-oauth",
     aliases=("commandcode-alpha",),
     api_mode="chat_completions",
-    # Declared so users can optionally override the credential via an env var.
-    # The pool row is the primary credential — auth_handler fills it — and this env
-    # var accepts the same bearer the Command Code CLI stores, which is what /alpha/generate wants.
+    # Upstream's live picker still gates on api_key until hermes-agent#122203 ships.
+    # This is a compatibility declaration, not the vendor's Provider API: auth_handler
+    # still imports the static CLI key into the pool and create_client speaks /alpha/generate.
     env_vars=("COMMANDCODE_CLI_TOKEN",),
     base_url=ALPHA_ORIGIN,
-    auth_type="oauth_external",
+    auth_type="api_key",
     display_name="CommandCode (OAuth)",
     description="Command Code — CLI sign-in over the same /alpha/generate endpoint the CLI uses",
     fallback_models=FALLBACK_MODELS,
