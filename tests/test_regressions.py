@@ -24,9 +24,9 @@ class ModelRetirementTest(unittest.TestCase):
     def test_retired_tier_is_model_scoped_even_when_status_is_forbidden(self):
         exc = transport.CommandCodeAPIError(
             "The free LongCat 2.0 tier has been retired. LongCat 2.0 is now a paid model", status_code=403)
-        self.assertEqual(errors.classify_api_error(exc), {"reason": "model_not_found"})
+        self.assertEqual(errors.classify_api_error(exc)["reason"], "model_not_found")
         self.assertEqual(errors.classify_api_error(transport.CommandCodeAPIError(
-            "Account access forbidden", status_code=403)), {"reason": "auth"})
+            "Account access forbidden", status_code=403))["reason"], "auth")
 
 
 class TransportRegressionTest(unittest.TestCase):

@@ -35,13 +35,19 @@ import re
 import logging
 import os
 import platform
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional
+
+if __package__:
+    from .credentials import env_token, allow_cli_fallback
+    from .http_support import open_credentialed
+else:  # Standalone fixtures also load this file outside its package.
+    from credentials import env_token, allow_cli_fallback
+    from http_support import open_credentialed
 
 logger = logging.getLogger("plugins.commandcode_oauth.transport")
 
@@ -250,18 +256,42 @@ def format_messages(
             wire_msgs.append({"role": "assistant", "content": parts or [{"type": "text", "text": ""}]})
         elif role == "tool":
             call_id = msg.get("tool_call_id") or ""
-            val = content if isinstance(content, str) else json.dumps(content)
             wire_msgs.append({
                 "role": "tool",
                 "content": [{
                     "type": "tool-result",
                     "toolCallId": call_id,
                     "toolName": call_id_to_name.get(call_id, "tool"),
-                    "output": {"type": "text", "value": val},
+                    "output": _tool_output(content, images_ok),
                 }],
             })
 
     return "\n\n".join(system_parts), wire_msgs
+
+
+def _tool_output(content: Any, images_ok: bool) -> Dict[str, Any]:
+    """AI SDK tool output: preserve screenshot pixels rather than stringify their data URL."""
+    if not isinstance(content, list):
+        return {"type": "text", "value": content if isinstance(content, str) else json.dumps(content)}
+    parts = []
+    for part in content:
+        if not isinstance(part, dict):
+            parts.append({"type": "text", "text": str(part)})
+        elif part.get("type") == "text":
+            parts.append({"type": "text", "text": part.get("text", "")})
+        else:
+            media = _normalize_media_part(part) if images_ok else None
+            url = media.get("image", "") if media and media["type"] == "image" else ""
+            if url.startswith("data:") and ";base64," in url:
+                parts.append({"type": "media", "data": url.split(",", 1)[1], "mediaType": media["mimeType"]})
+            elif url.startswith(("https://", "http://")):
+                # AI SDK 6 accepts URL images in tool output; data URLs above also work on v5.
+                parts.append({"type": "image-url", "url": url})
+            else:
+                parts.append({"type": "text", "text": _image_placeholder(part)})
+    if any(part["type"] != "text" for part in parts):
+        return {"type": "content", "value": parts}
+    return {"type": "text", "value": "\n".join(part["text"] for part in parts)}
 
 
 def format_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -300,7 +330,8 @@ def workspace_config(cwd: Optional[str] = None) -> Dict[str, Any]:
 
 
 def _token_from_kwargs(api_key: Optional[str]) -> str:
-    return (api_key or os.environ.get("COMMANDCODE_CLI_TOKEN") or "").strip() or cli_token()
+    token = (api_key or "").strip() or env_token()
+    return token or (cli_token() if allow_cli_fallback() else "")
 
 
 def _request_body(api_kwargs: Dict[str, Any], model: str) -> Dict[str, Any]:
@@ -321,7 +352,7 @@ def _request_body(api_kwargs: Dict[str, Any], model: str) -> Dict[str, Any]:
         "messages": wire_msgs,
         "tools": format_tools(tools),
         "system": system_prompt,
-        "max_tokens": api_kwargs.get("max_tokens") or 4096,
+        "max_tokens": api_kwargs.get("max_tokens") or api_kwargs.get("max_completion_tokens") or 4096,
         "stream": True,
     }
     temperature = api_kwargs.get("temperature")
@@ -368,7 +399,8 @@ def coerce_timeout(value: Any, default: float = DEFAULT_TIMEOUT_S) -> float:
     return default
 
 
-def _open_stream(url: str, body: Dict[str, Any], token: str, timeout: float):
+@contextlib.contextmanager
+def _open_stream(url: str, body: Dict[str, Any], token: str, timeout: float, *, headers=None, http_client=None):
     req = urllib.request.Request(url)
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Content-Type", "application/json")
@@ -378,9 +410,27 @@ def _open_stream(url: str, body: Dict[str, Any], token: str, timeout: float):
     req.add_header("x-taste-learning", "false")
     req.add_header("x-co-flag", "false")
     req.add_header("x-session-id", str(uuid.uuid4()))
+    for name, value in (headers or {}).items():
+        req.add_header(name, value)
     req.data = json.dumps(body).encode("utf-8")
+    if http_client is not None:
+        import httpx
+
+        try:
+            # Never inherit follow_redirects=True for a credential-bearing custom client.
+            with http_client.stream("POST", url, content=req.data, headers=dict(req.header_items()),
+                                    timeout=timeout, follow_redirects=False) as response:
+                if response.status_code >= 300:
+                    detail = response.read().decode("utf-8", "replace")[:500]
+                    raise CommandCodeAPIError(f"Command Code HTTP {response.status_code}: {detail}",
+                                              status_code=response.status_code)
+                yield response.iter_lines()
+        except httpx.HTTPError as exc:
+            raise CommandCodeAPIError(f"Command Code connection failed: {exc}") from exc
+        return
     try:
-        return urllib.request.urlopen(req, timeout=timeout)
+        with open_credentialed(req, timeout=timeout) as response:
+            yield response
     except urllib.error.HTTPError as exc:
         detail = ""
         with contextlib.suppress(Exception):
@@ -395,13 +445,15 @@ def _open_stream(url: str, body: Dict[str, Any], token: str, timeout: float):
 def _iter_events(resp) -> Iterator[Dict[str, Any]]:
     """Yield decoded NDJSON events, raising on in-stream ``error`` events."""
     for raw_line in resp:
-        line = raw_line.decode("utf-8", "replace").strip()
+        line = (raw_line.decode("utf-8", "replace") if isinstance(raw_line, bytes) else raw_line).strip()
         if not line:
             continue
         try:
             event = json.loads(line)
         except Exception:
             logger.debug("commandcode: skipping non-JSON stream line: %.200s", line)
+            continue
+        if not isinstance(event, dict):
             continue
         if event.get("type") == "error":
             err = event.get("error")
@@ -523,12 +575,14 @@ class CommandCodeAlphaClient:
     HERMES_SKIP_ASYNC_WRAP = True
 
     def __init__(self, *, api_key: str | None = None, base_url: str | None = None,
-                 default_headers: dict | None = None, timeout: float | None = None, **_: Any) -> None:
+                 default_headers: dict | None = None, timeout: float | None = None,
+                 http_client: Any = None, **_: Any) -> None:
         self.api_key = _token_from_kwargs(api_key)
         self.base_url = str(base_url or ALPHA_ORIGIN)
         # Honour a user-set base_url (proxy / self-hosted) instead of pinning the public origin.
         self._generate_url = generate_url(self.base_url)
         self._default_headers = dict(default_headers or {})
+        self._http_client = http_client
         self._timeout = coerce_timeout(timeout)
         self.is_closed = False
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
@@ -567,7 +621,8 @@ class CommandCodeAlphaClient:
         finished = False
         tool_calls: List[Any] = []
         usage = None
-        with _open_stream(self._generate_url, body, token, timeout) as resp:
+        with _open_stream(self._generate_url, body, token, timeout,
+                          headers=self._default_headers, http_client=self._http_client) as resp:
             for event in _iter_events(resp):
                 ev_type = event.get("type")
                 if ev_type == "text-delta":
@@ -621,7 +676,8 @@ class CommandCodeAlphaClient:
         usage = None
         started = False
         finished = False
-        with _open_stream(self._generate_url, body, token, timeout) as resp:
+        with _open_stream(self._generate_url, body, token, timeout,
+                          headers=self._default_headers, http_client=self._http_client) as resp:
             for event in _iter_events(resp):
                 ev_type = event.get("type")
                 if ev_type == "text-delta":

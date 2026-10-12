@@ -21,12 +21,10 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-import os
 import time
 import urllib.parse
 import urllib.request
-from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from providers import register_provider
 from providers.base import ProviderProfile
@@ -34,6 +32,8 @@ from providers.base import ProviderProfile
 from .auth import CommandCodeAuthError, auth_handler, read_cli_token, refresh_credential, validate
 from .errors import classify_api_error
 from .transport import ALPHA_ORIGIN, CommandCodeAlphaClient
+from .credentials import env_token, allow_cli_fallback
+from .http_support import open_credentialed
 
 logger = logging.getLogger("plugins.commandcode_oauth")
 
@@ -77,7 +77,7 @@ def _http_json(url: str, token: str, *, timeout: float) -> Optional[Any]:
         req.add_header("Authorization", f"Bearer {token}")
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", "cli")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_credentialed(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
         logger.debug("commandcode: GET %s failed: %s", url, exc)
@@ -97,7 +97,7 @@ class CommandCodeOAuthProfile(ProviderProfile):
 
     def _credential(self, api_key: str | None = None) -> str:
         """Resolve an explicit key, env override, Hermes pool, then the read-only CLI file."""
-        token = (api_key or os.environ.get("COMMANDCODE_CLI_TOKEN") or "").strip()
+        token = (api_key or "").strip() or env_token()
         if token:
             return token
         from hermes_cli.auth import read_credential_pool
@@ -108,6 +108,8 @@ class CommandCodeOAuthProfile(ProviderProfile):
             token = str(entry.get("access_token") or "").strip()
             if token:
                 return token
+        if not allow_cli_fallback():
+            return ""
         try:
             return read_cli_token()
         except CommandCodeAuthError:
@@ -186,6 +188,8 @@ class CommandCodeOAuthProfile(ProviderProfile):
             return None
         summary = get(f"/alpha/usage/summary{suffix}")
 
+        from agent.account_usage import AccountUsageWindow
+
         windows = []
         details = []
         limits = credits_payload.get("windowLimits") or {}
@@ -199,7 +203,7 @@ class CommandCodeOAuthProfile(ProviderProfile):
                 datetime.datetime.fromtimestamp(float(reset_at) / 1000.0, tz=datetime.timezone.utc)
                 if isinstance(reset_at, (int, float)) and reset_at > 0 else None
             )
-            windows.append(SimpleNamespace(
+            windows.append(AccountUsageWindow(
                 label=label,
                 used_percent=max(0.0, min(100.0, used / cap * 100.0)),
                 reset_at=reset_dt,
