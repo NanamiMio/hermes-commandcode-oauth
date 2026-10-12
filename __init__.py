@@ -9,16 +9,19 @@ Upstream ships Command Code as an *API-key* profile against the OpenAI-compatibl
 reach models through the same ``/alpha/generate`` endpoint the CLI uses.
 
 The integration PR for this provider was asked to ship as an external model-provider plugin, so
-everything lives outside the tree and touches no core file, using documented extension points:
+everything lives outside the tree and touches no core file, using provider hooks and a temporary
+compatibility property:
 
 * :meth:`ProviderProfile.create_client` — supplies the ``/alpha`` transport
   (:mod:`transport`) instead of an HTTP client.
-* :meth:`ProviderProfile.fetch_models` — the account's live catalog.
+* :meth:`ProviderProfile.fetch_models` — the public model catalog.
+* ``fallback_models`` property — live catalogs for OAuth pickers until upstream #122203 ships.
 """
 
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import logging
 import time
@@ -34,6 +37,7 @@ from .errors import classify_api_error
 from .transport import ALPHA_ORIGIN, CommandCodeAlphaClient
 from .credentials import env_token, allow_cli_fallback
 from .http_support import open_credentialed
+from .catalog import CatalogCache
 
 logger = logging.getLogger("plugins.commandcode_oauth")
 
@@ -41,8 +45,7 @@ logger = logging.getLogger("plugins.commandcode_oauth")
 # are the entries that cost nothing rather than whatever the endpoint lists last.
 ZERO_COST_MODELS = ("poolside/laguna-s-2.1-free",)
 
-# Setup probes the account through ``fetch_models``. Pickers whose core still gates live
-# probing on api_key profiles also use this fallback (see the README's compatibility note).
+# The offline list stays separate from the temporary live fallback_models property.
 FALLBACK_MODELS = (
     "poolside/laguna-s-2.1-free",
     "deepseek/deepseek-v4.1-flash",
@@ -91,11 +94,52 @@ def _as_float(value: Any) -> Optional[float]:
 class CommandCodeOAuthProfile(ProviderProfile):
     """Command Code, through the same ``/alpha/generate`` endpoint the CLI uses."""
 
+    @property
+    def fallback_models(self) -> tuple[str, ...]:
+        """Bridge old OAuth pickers by fetching when core reads this dataclass field.
+
+        Inspired by anpicasso/hermes-kiro-provider's property bridge. No core patch is needed;
+        the setter keeps dataclass construction offline. Cold probes use a three-second HTTP timeout.
+        """
+        try:
+            # Metadata reads before auth add must not sign in using the host CLI implicitly.
+            token = self._credential(cli_fallback=False)
+            if not token:
+                return self._offline_models
+            origin = self._catalog_origin()
+            return self._catalog_cache.read(self._catalog_key(token, origin), lambda: self.fetch_models(
+                api_key=token, base_url=origin, timeout=3.0)) or self._offline_models
+        except Exception:
+            logger.debug("commandcode: compatibility catalog unavailable", exc_info=True)
+            return self._offline_models
+
+    @fallback_models.setter
+    def fallback_models(self, models: tuple[str, ...]) -> None:
+        self._offline_models = tuple(models)
+        self._catalog_cache = CatalogCache()
+
+    def _catalog_origin(self) -> str:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+        model = config.get("model") or {}
+        names = {self.name, *self.aliases}
+        if isinstance(model, dict) and str(model.get("provider") or "").strip().lower() in names:
+            configured = str(model.get("base_url") or "").strip()
+            if configured:
+                return _api_origin(configured)
+        return _api_origin(self.base_url)
+
+    def _catalog_key(self, token: str, origin: str) -> tuple[str, str, str]:
+        from hermes_constants import hermes_home_key
+
+        return hermes_home_key(), origin, hashlib.sha256(token.encode()).hexdigest()
+
     def create_client(self, **client_kwargs: Any) -> Any:
         """Supply the ``/alpha`` transport instead of an OpenAI-over-HTTP client."""
         return CommandCodeAlphaClient(**client_kwargs)
 
-    def _credential(self, api_key: str | None = None) -> str:
+    def _credential(self, api_key: str | None = None, *, cli_fallback: bool = True) -> str:
         """Resolve an explicit key, env override, Hermes pool, then the read-only CLI file."""
         token = (api_key or "").strip() or env_token()
         if token:
@@ -108,7 +152,7 @@ class CommandCodeOAuthProfile(ProviderProfile):
             token = str(entry.get("access_token") or "").strip()
             if token:
                 return token
-        if not allow_cli_fallback():
+        if not cli_fallback or not allow_cli_fallback():
             return ""
         try:
             return read_cli_token()
@@ -134,27 +178,33 @@ class CommandCodeOAuthProfile(ProviderProfile):
     def fetch_models(
         self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
-        """The account's live catalog, zero-cost entries first.
+        """Public model catalog, zero-cost entries first; not an account entitlement check.
 
-        ``None`` (not ``[]``) when the account is unreachable: the caller then falls back to
-        ``fallback_models``, whereas an empty list would look like a genuinely empty account.
+        ``None`` (not ``[]``) on failure. Successful native probes seed the property cache too,
+        so newer cores merging fallback_models under the same credentials use those live IDs.
         """
         token = self._credential(api_key)
         if not token:
             return None
-        payload = _http_json(f"{_api_origin(base_url)}{_PROVIDER_PATH_MARKER}/models", token, timeout=timeout)
+        origin = _api_origin(base_url) if base_url else self._catalog_origin()
+        key = self._catalog_key(token, origin)
+        payload = _http_json(f"{origin}{_PROVIDER_PATH_MARKER}/models", token, timeout=timeout)
         models: List[str] = []
         if isinstance(payload, dict):
-            for item in payload.get("data") or payload.get("models") or []:
+            rows = payload.get("data") or payload.get("models") or []
+            for item in rows if isinstance(rows, list) else []:
                 model_id = item.get("id") if isinstance(item, dict) else item
                 if isinstance(model_id, str) and model_id.strip():
-                    models.append(model_id.strip())
+                    if model_id.strip() not in models:
+                        models.append(model_id.strip())
         if not models:
+            self._catalog_cache.remember(key, None)
             return None
         for name in reversed(ZERO_COST_MODELS):
             if name in models:
                 models.remove(name)
                 models.insert(0, name)
+        self._catalog_cache.remember(key, models)
         return models
 
     def fetch_account_usage(self, *, base_url: str | None = None, api_key: str | None = None):
@@ -243,12 +293,10 @@ commandcode_oauth = CommandCodeOAuthProfile(
     name="commandcode-oauth",
     aliases=("commandcode-alpha",),
     api_mode="chat_completions",
-    # Upstream's live picker still gates on api_key until hermes-agent#122203 ships.
-    # This is a compatibility declaration, not the vendor's Provider API: auth_handler
-    # still imports the static CLI key into the pool and create_client speaks /alpha/generate.
+    # The property bridge supplies live OAuth picker rows until hermes-agent#122203 ships.
     env_vars=("COMMANDCODE_CLI_TOKEN",),
     base_url=ALPHA_ORIGIN,
-    auth_type="api_key",
+    auth_type="oauth_external",
     display_name="CommandCode (OAuth)",
     description="Command Code — CLI sign-in over the same /alpha/generate endpoint the CLI uses",
     fallback_models=FALLBACK_MODELS,

@@ -14,7 +14,8 @@ same `/alpha/generate` endpoint the CLI uses and the sign-in it already stores.
 | `register_provider` | provider `commandcode-oauth` (alias `commandcode-alpha`) |
 | `create_client` | the `/alpha/generate` transport, OpenAI-shaped: sync calls, streaming chunks, and awaitable for the async auxiliary path |
 | `auth_handler`, `refresh_credential` | `hermes auth add\|status\|logout\|refresh commandcode-oauth`: import/sign in, report/remove credentials, or validate/reimport one static key without an OAuth refresh grant |
-| `fetch_models` | the account's live catalog |
+| `fetch_models` | the public live model catalog; it does not verify account entitlements |
+| `fallback_models` property | temporary live catalog bridge for OAuth pickers while upstream #122203 is pending |
 | `setup_status`, `discover_models` | verified login status with a login command, and live model rows from the CLI key or Hermes credential pool |
 | `fetch_account_usage` | plan limits: credits, 5-hour and weekly windows, current-period spend |
 | `classify_api_error` | maps endpoint failures onto Hermes' failover reasons (billing, rate limit, auth, server) |
@@ -36,10 +37,11 @@ and async calls. A caller-supplied client remains the caller's responsibility to
 
 ## Install
 
-The plugin currently declares `auth_type="api_key"` for compatibility with Hermes' live model
-picker. Authentication still imports the Command Code CLI's static key or receives one through
-the browser hand-off; inference still uses `/alpha/generate` through the plugin's own client.
-This declaration does not switch requests to the vendor's Provider API.
+Requires Hermes **0.21.6 or later**, which includes the generic OAuth plugin auxiliary router.
+The plugin declares `auth_type="oauth_external"` so model setup uses the plugin login gate.
+Authentication imports the Command Code CLI's static key or receives one through the browser
+hand-off; inference uses `/alpha/generate` through the plugin's own client. No OAuth exchange
+or refresh grant is manufactured.
 
 ```bash
 # straight from the repository
@@ -65,12 +67,20 @@ commits reach catalog users only after a separate catalog pin update is reviewed
 - **Setup**: run `hermes auth add commandcode-oauth` first. The provider's own auth handler
   imports the CLI key or opens the browser and saves the credential in Hermes' pool.
   `COMMANDCODE_CLI_TOKEN` remains an optional key override.
-- **Picker compatibility**: keep `auth_type="api_key"` while
-  [upstream PR #122203](https://github.com/NousResearch/hermes-agent/pull/122203) is pending,
-  so `/model` and the Desktop picker can fetch live models on upstream Hermes.
-  Switch to `oauth_external` only after a supported Hermes release includes both that picker
-  change and the generic plugin OAuth auxiliary routing fix
-  [`f12e6b66`](https://github.com/NousResearch/hermes-agent/commit/f12e6b66d960a92d9d4779cfcc628ab9cb02555b).
+- **Picker compatibility**: until [upstream PR #122203](https://github.com/NousResearch/hermes-agent/pull/122203)
+  ships in a supported release, a Python `fallback_models` property supplies the live catalog
+  when older OAuth pickers read that field. This follows the property bridge in
+  [anpicasso/hermes-kiro-provider](https://github.com/anpicasso/hermes-kiro-provider/blob/013017d27acd58051c4ad654bb21036d93bdd3ce/provider/__init__.py#L25-L46),
+  without patching Hermes functions or source files. Dataclass construction and provider
+  registration make no catalog request. A cold authenticated property read uses a
+  **3-second HTTP timeout**; subsequent reads cache successful results for **5 minutes**, with **60 seconds**
+  of backoff after failure. Concurrent readers use the previous list or the offline list while
+  one request is in flight. Cache keys include profile home, credential fingerprint and API origin.
+  Native `fetch_models` remains available and seeds the same cache, so newer core merges under
+  the same credentials use that live list without another request or static additions. The bridge can be
+  removed after #122203 ships and those picker paths are retested. The already released auxiliary
+  router fix [`f12e6b66`](https://github.com/NousResearch/hermes-agent/commit/f12e6b66d960a92d9d4779cfcc628ab9cb02555b)
+  is included in the minimum supported version; no pending core PR is required.
 - **Credentials**: the plugin only reads `~/.commandcode/auth.json`; it never writes or refreshes
   the vendor CLI's store. Browser keys are saved only in Hermes' credential pool. A busy callback
   port (5959) fails immediately with instructions; the listener is bound before the URL is shown
@@ -84,9 +94,16 @@ commits reach catalog users only after a separate catalog pin update is reviewed
 - **HTTP redirects**: stdlib requests strip sensitive headers on a different origin. A supplied
   HTTP client follows no redirects for generation requests, so its proxy/TLS policy is used
   without sending credentials to a redirect target.
-- **`fallback_models` is an offline fallback**, not the catalog — the catalog is fetched live.
+- **Offline models**: `FALLBACK_MODELS` is the static offline list. The temporary `fallback_models`
+  property returns the current credential's cached live list, or that offline list if discovery
+  has never succeeded. It keeps a last successful list on transient failure and stops serving
+  the old account's list on logout or credential change. The property probes only explicit
+  scoped credentials or the pool; import the CLI account through `hermes auth add` first.
   Live discovery only reorders models returned by the service; it never inserts absent free
   tiers. The retired `meituan/LongCat-2.0:free` SKU is excluded from the offline fallback.
+  Hermes also has its own disk catalog cache, normally one hour; the property TTL does not
+  replace that cache. The public `/provider/v1/models` list does not prove that every model
+  is callable under the signed-in subscription.
 - **Vision** travels through the same endpoint; verified against a solid-colour test image.
 
 ## Disclosure
