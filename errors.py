@@ -45,19 +45,19 @@ def classify_api_error(
     text = f"{message or ''} {body or ''} {error or ''}".lower()
 
     if code == 402 or "insufficient balance" in text or "insufficient_balance" in text:
-        return {"reason": "billing"}
+        return {"reason": "billing", "retryable": False, "should_rotate_credential": True, "should_fallback": True}
     if code == 401:
-        return {"reason": "auth"}
+        return {"reason": "auth", "retryable": False, "should_rotate_credential": True, "should_fallback": True}
     if code == 403:
         # A retired model can return FORBIDDEN even with a valid account key.
         # Treat it as model-scoped so Hermes does not cool down the credential.
         if "has been retired" in text and ("model" in text or "tier" in text):
-            return {"reason": "model_not_found"}
+            return {"reason": "model_not_found", "retryable": False, "should_fallback": True}
         # The alpha endpoint answers 403 when a credential has no access to the requested
         # model/route; the key itself may be fine, but from here it is an auth-shaped stop.
-        return {"reason": "auth"}
+        return {"reason": "auth", "retryable": False, "should_fallback": True}
     if code == 429:
-        return {"reason": "rate_limit"}
+        return {"reason": "rate_limit", "should_rotate_credential": True, "should_fallback": True}
     if code in (503, 529):
         return {"reason": "overloaded"}
     if code in (500, 502):
@@ -65,12 +65,12 @@ def classify_api_error(
     if code in (504, 408):
         return {"reason": "timeout"}
     if code == 404:
-        return {"reason": "model_not_found"}
+        return {"reason": "model_not_found", "retryable": False, "should_fallback": True}
     if code == 413:
-        return {"reason": "payload_too_large"}
+        return {"reason": "payload_too_large", "should_compress": True}
     if code == 400:
         if "tool_choice" in text or "tool choice" in text:
-            return {"reason": "format_error"}
+            return {"reason": "format_error", "retryable": False, "should_fallback": True}
         if "context" in text or "too long" in text or "maximum" in text:
-            return {"reason": "context_overflow"}
+            return {"reason": "context_overflow", "should_compress": True}
     return None

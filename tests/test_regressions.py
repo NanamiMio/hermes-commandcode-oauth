@@ -24,9 +24,9 @@ class ModelRetirementTest(unittest.TestCase):
     def test_retired_tier_is_model_scoped_even_when_status_is_forbidden(self):
         exc = transport.CommandCodeAPIError(
             "The free LongCat 2.0 tier has been retired. LongCat 2.0 is now a paid model", status_code=403)
-        self.assertEqual(errors.classify_api_error(exc), {"reason": "model_not_found"})
+        self.assertEqual(errors.classify_api_error(exc)["reason"], "model_not_found")
         self.assertEqual(errors.classify_api_error(transport.CommandCodeAPIError(
-            "Account access forbidden", status_code=403)), {"reason": "auth"})
+            "Account access forbidden", status_code=403))["reason"], "auth")
 
 
 class TransportRegressionTest(unittest.TestCase):
@@ -262,8 +262,8 @@ class ProfileRegressionTest(unittest.TestCase):
         self.assertEqual(model, "vision/model")
         self.assertEqual(client._generate_url, "http://127.0.0.1:9999/alpha/generate")
 
-    def test_api_key_picker_uses_imported_browser_credential(self):
-        from hermes_cli.auth import resolve_api_key_provider_credentials
+    def test_oauth_picker_uses_imported_browser_credential(self):
+        from hermes_cli.auth import get_auth_status
         from hermes_cli.models import _profile_live_catalog
 
         package_auth = self.module.auth
@@ -273,8 +273,8 @@ class ProfileRegressionTest(unittest.TestCase):
                     "token": "browser-token", "source": "commandcode-studio"}), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.profile.auth_handler("add", SimpleNamespace(provider=self.profile.name))
-            creds = resolve_api_key_provider_credentials(self.profile.name)
-            self.assertEqual(creds["api_key"], "browser-token")
+            self.assertTrue(get_auth_status(self.profile.name)["logged_in"])
+            self.assertEqual(self.profile.auth_type, "oauth_external")
             with patch.object(self.module, "_http_json", return_value={
                     "data": [{"id": "fixture/live-model"}]}) as get:
                 self.assertIn("fixture/live-model", _profile_live_catalog(self.profile.name))

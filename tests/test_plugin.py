@@ -276,7 +276,11 @@ class ErrorClassificationTest(unittest.TestCase):
         )
 
     def test_billing_covers_the_in_stream_402(self):
-        self.assertEqual(self.classify(402, "Insufficient Balance"), {"reason": "billing"})
+        verdict = self.classify(402, "Insufficient Balance")
+        self.assertEqual(verdict["reason"], "billing")
+        self.assertFalse(verdict["retryable"])
+        self.assertTrue(verdict["should_rotate_credential"])
+        self.assertTrue(verdict["should_fallback"])
 
     def test_status_table(self):
         self.assertEqual(self.classify(401)['reason'], "auth")
@@ -380,4 +384,6 @@ class CallbackBindingTest(unittest.TestCase):
             with socket.create_connection((host, port), timeout=1):
                 pass
         finally:
-            server.shutdown(); server.server_close(); thread.join(timeout=1.0)
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1.0)

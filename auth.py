@@ -11,16 +11,15 @@ Two ways in, both ending as a pooled OAuth row:
    in Hermes' credential pool; the vendor CLI's credential file is read-only.
 
 Per ``providers/base.py`` a non-api-key plugin owns its own auth: ``auth_handler``
-serves ``hermes auth add|status|logout <name>`` and ``refresh_credential`` rotates a
-pooled row. Both are self-contained — nothing here imports Hermes internals beyond the
-credential-pool types, so the plugin keeps working when the core moves.
+serves ``hermes auth add|status|logout|refresh <name>``. Static-key refresh uses
+Hermes' pool persistence without pretending a refresh grant exists; credential reads
+use the active profile's secret scope. The vendor CLI's store remains read-only.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import secrets
 import threading
 import time
@@ -29,6 +28,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 from urllib.parse import urlencode, urlparse
+
+if __package__:
+    from .credentials import env_token
+    from .http_support import open_credentialed
+else:  # The standalone unittest fixtures import auth as a flat module.
+    from credentials import env_token
+    from http_support import open_credentialed
 
 logger = logging.getLogger("plugins.commandcode_oauth.auth")
 
@@ -93,7 +99,7 @@ def validate(token: str, *, timeout: float = 10.0) -> Optional[Dict[str, str]]:
         req.add_header("Authorization", f"Bearer {key}")
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", "cli")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_credentialed(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
         logger.debug("validate: %s", exc)
@@ -196,12 +202,12 @@ def _wait_for_callback(result, *, timeout: float = 120.0) -> Dict[str, Any]:
 def login(*, open_browser: bool = True, timeout: float = 120.0) -> Dict[str, Any]:
     """Import the CLI's grant, or fall back to the studio's loopback hand-off."""
     try:
-        env_token = os.environ.get("COMMANDCODE_CLI_TOKEN", "").strip()
-        token = env_token or read_cli_token()
+        override = env_token()
+        token = override or read_cli_token()
         identity = validate(token)
         if identity is not None:
             logger.debug("using the Command Code CLI grant for %s", identity.get("user_name") or "user")
-            return {"token": token, "source": "commandcode-env" if env_token else "commandcode-cli", **identity}
+            return {"token": token, "source": "commandcode-env" if override else "commandcode-cli", **identity}
     except CommandCodeAuthError as exc:
         logger.debug("CLI grant unusable, falling back to browser: %s", exc)
 
@@ -236,7 +242,7 @@ def login(*, open_browser: bool = True, timeout: float = 120.0) -> Dict[str, Any
 # ── ProviderProfile hooks ────────────────────────────────────────────────────
 
 def auth_handler(action: str, args: Any) -> bool:
-    """Own ``hermes auth add|status|logout <provider>``; decline ``refresh`` to the pool."""
+    """Own static-key auth commands; refresh validates/reimports without an OAuth grant."""
     from agent.credential_pool import AUTH_TYPE_OAUTH, PooledCredential, load_pool
 
     provider = pool_provider(args)
@@ -255,7 +261,8 @@ def auth_handler(action: str, args: Any) -> bool:
             access_token=creds["token"],
             # The CLI grant has no expiry the pool can trust, so leave it unset:
             # _is_usable() treats a missing expiry as usable and a 401 still parks the row.
-            extra={"commandcode": {"source": creds.get("source", ""), "user_name": creds.get("user_name", "")}},
+            extra={"commandcode": {"source": creds.get("source", ""),
+                                   "user_name": creds.get("user_name", ""), "user_id": creds.get("user_id", "")}},
         ))
         who = creds.get("user_name") or creds.get("user_id") or "your account"
         print(f"Signed in to Command Code as {who}; credential {entry.id} added to the pool.")
@@ -284,9 +291,39 @@ def auth_handler(action: str, args: Any) -> bool:
         print(f"Logged out of {provider} ({count} credential(s) removed)")
         return True
 
-    # ``refresh`` (and anything new) stays with the shell: pooled rows rotate through
-    # refresh_credential() below.
+    if action == "refresh":
+        _refresh_static_key(pool, provider, getattr(args, "target", None))
+        return True
     return False
+
+
+def _refresh_static_key(pool, provider, target):
+    from dataclasses import replace
+    from hermes_cli.auth import write_credential_pool
+
+    entries = pool.entries()
+    if not entries:
+        raise SystemExit(f"No {provider} credentials in the pool.")
+    if target is None or not str(target).strip():
+        if len(entries) != 1:
+            raise SystemExit(f"{provider} has {len(entries)} credentials; pass an index, id, or label.")
+        entry = entries[0]
+    else:
+        _, entry, error = pool.resolve_target(target)
+        if entry is None:
+            raise SystemExit(error)
+    rotated = refresh_credential(entry)
+    updated = replace(entry, **rotated, last_status="ok", last_status_at=None,
+                      last_error_code=None, last_error_reason=None, last_error_message=None,
+                      last_error_reset_at=None, model_cooldowns=None, status_cleared_at=time.time(),
+                      extra={k: v for k, v in entry.extra.items() if k != "failure_reason"})
+    rows = [updated.to_dict() if existing.id == entry.id else existing.to_dict() for existing in entries]
+    bases = {existing.id: (existing.access_token, existing.refresh_token) for existing in entries}
+    saved = write_credential_pool(provider, rows, status_cleared_ids=[entry.id], token_bases=bases)
+    current = next((row for row in saved if row.get("id") == entry.id), None)
+    if current is None or current.get("access_token") != updated.access_token:
+        raise CommandCodeAuthError("Credential changed concurrently; retry the refresh command.")
+    print(f"Verified {provider} credential {entry.id}; static key revalidated or reimported.")
 
 
 def refresh_credential(entry: Any) -> Mapping[str, Any]:
@@ -296,9 +333,10 @@ def refresh_credential(entry: Any) -> Mapping[str, Any]:
     never be replaced by an unrelated key from the vendor's CLI store.
     """
     token = str(getattr(entry, "access_token", "") or "").strip()
-    source = (getattr(entry, "extra", {}) or {}).get("commandcode", {}).get("source")
+    metadata = (getattr(entry, "extra", {}) or {}).get("commandcode", {})
+    source = metadata.get("source")
     if source == "commandcode-env":
-        token = os.environ.get("COMMANDCODE_CLI_TOKEN", "").strip() or token
+        token = env_token() or token
     elif source != "commandcode-studio":
         try:
             token = read_cli_token()
@@ -310,6 +348,13 @@ def refresh_credential(entry: Any) -> Mapping[str, Any]:
         raise CommandCodeAuthError(
             "Command Code rejected the stored credential; run `hermes auth add commandcode-oauth` again."
         )
+    original = str(getattr(entry, "access_token", "") or "").strip()
+    if token != original:
+        previous = metadata.get("user_id") or (validate(original) or {}).get("user_id")
+        if not previous or previous != identity.get("user_id"):
+            raise CommandCodeAuthError(
+                "The replacement CLI/environment key is for a different or unverified account; "
+                "use `hermes auth add commandcode-oauth` to import it explicitly.")
     return {
         "access_token": token,
         "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
