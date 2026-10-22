@@ -283,5 +283,5 @@ class ProfileRegressionTest(unittest.TestCase):
     def test_models_and_usage_honour_proxy_provider_api_origin(self):
         with patch.object(self.module, "_http_json", return_value={"data": [{"id": "vision/model"}]}) as get:
             self.profile.fetch_models(api_key="fixture-token", base_url="http://127.0.0.1:9999/provider/v1")
-        self.assertEqual(get.call_args.args[0], "http://127.0.0.1:9999/provider/v1/models")
+        self.assertEqual(get.call_args.args[0], "http://127.0.0.1:9999/provider/v1/models?view=client")
         self.assertEqual(self.module._api_origin("http://127.0.0.1:9999/provider/v1"), "http://127.0.0.1:9999")

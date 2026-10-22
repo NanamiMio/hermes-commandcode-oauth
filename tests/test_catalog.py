@@ -100,10 +100,10 @@ class OAuthCatalogTest(unittest.TestCase):
                     reset_secret_scope(scoped)
                     reset_hermes_home_override(bound)
         self.assertEqual(observed, [
-            ("https://relay-a.test/provider/v1/models", "token-a"),
-            ("https://relay-a.test/provider/v1/models", "token-a"),
-            ("https://relay-a.test/provider/v1/models", "token-b"),
-            ("https://relay-b.test/provider/v1/models", "token-b")])
+            ("https://relay-a.test/provider/v1/models?view=client", "token-a"),
+            ("https://relay-a.test/provider/v1/models?view=client", "token-a"),
+            ("https://relay-a.test/provider/v1/models?view=client", "token-b"),
+            ("https://relay-b.test/provider/v1/models?view=client", "token-b")])
 
     def test_native_fetch_then_merge_uses_the_same_live_list_without_second_request(self):
         from hermes_cli.models import merge_profile_catalog
@@ -127,7 +127,7 @@ class OAuthCatalogTest(unittest.TestCase):
                 patch.object(self.module, "_http_json", return_value={"data": [{"id": "fixture/relay"}]}) as get:
             rows = _build_curated_lists(self.profile.name, "https://relay.test/provider/v1", "", non_blocking=True)
         self.assertEqual(rows[self.profile.name], ["fixture/relay"])
-        get.assert_called_once_with("https://relay.test/provider/v1/models", "fixture-token", timeout=3.0)
+        get.assert_called_once_with("https://relay.test/provider/v1/models?view=client", "fixture-token", timeout=3.0)
 
     def test_concurrent_reads_do_not_duplicate_the_inflight_request(self):
         started, release = threading.Event(), threading.Event()
@@ -171,7 +171,7 @@ class OAuthCatalogTest(unittest.TestCase):
                 f"model:\n  provider: commandcode-oauth\n  base_url: http://127.0.0.1:{relay.server_port}/provider/v1\n")
             self.assertEqual(self.profile.fallback_models, ("fixture/relay-model",))
             self.assertEqual(self.profile.fallback_models, ("fixture/relay-model",))
-            self.assertEqual(received, [("/provider/v1/models", "Bearer fixture-token")])
+            self.assertEqual(received, [("/provider/v1/models?view=client", "Bearer fixture-token")])
         finally:
             relay.shutdown()
             relay.server_close()

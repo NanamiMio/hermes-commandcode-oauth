@@ -14,9 +14,9 @@ same `/alpha/generate` endpoint the CLI uses and the sign-in it already stores.
 | `register_provider` | provider `commandcode-oauth` (alias `commandcode-alpha`) |
 | `create_client` | the `/alpha/generate` transport, OpenAI-shaped: sync calls, streaming chunks, and awaitable for the async auxiliary path |
 | `auth_handler`, `refresh_credential` | `hermes auth add\|status\|logout\|refresh commandcode-oauth`: import/sign in, report/remove credentials, or validate/reimport one static key without an OAuth refresh grant |
-| `fetch_models` | the public live model catalog; it does not verify account entitlements |
+| `fetch_models` | client-view catalog with hidden models and confirmed account plan locks filtered out |
 | `fallback_models` property | temporary live catalog bridge for OAuth pickers while upstream #122203 is pending |
-| `setup_status`, `discover_models` | verified login status with a login command, and live model rows from the CLI key or Hermes credential pool |
+| `setup_status`, `discover_models` | verified login status and live model rows, including availability and plan-lock notes |
 | `fetch_account_usage` | plan limits: credits, 5-hour and weekly windows, current-period spend |
 | `classify_api_error` | maps endpoint failures onto Hermes' failover reasons (billing, rate limit, auth, server) |
 
@@ -34,6 +34,20 @@ usage windows use Hermes' `AccountUsageWindow`, credentials respect the active p
 error classifications include recovery hints, and screenshot tool results keep their media parts.
 Custom `default_headers` and a supplied synchronous `httpx.Client` are used by sync, streaming
 and async calls. A caller-supplied client remains the caller's responsibility to close.
+
+## Account model availability
+
+The catalog uses the installed Command Code 1.87.1 client's access rules: model
+`minimumPlan`/`category`, the active subscription, and purchased/free extra credits.
+Confirmed locked models are omitted from Hermes' selectable model IDs; detailed discovery
+keeps their `available: false` and a lock note. Hidden models are excluded entirely.
+Unavailable billing data and unknown plans do not infer locks. The result is cached per
+profile, credential and API origin for five minutes, within the existing probe timeout.
+A successful empty catalog stays empty rather than restoring offline model names.
+Plan access does not guarantee that a model is below its RPM limit.
+
+See the [installed-client audit](docs/client-1.87.1-audit.md) for evidence, validation and
+remaining differences, including catalog-driven image capabilities and wire-version compatibility.
 
 ## Recovery behavior
 

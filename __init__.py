@@ -14,7 +14,7 @@ compatibility property:
 
 * :meth:`ProviderProfile.create_client` — supplies the ``/alpha`` transport
   (:mod:`transport`) instead of an HTTP client.
-* :meth:`ProviderProfile.fetch_models` — the public model catalog.
+* :meth:`ProviderProfile.fetch_models` — client catalog with confirmed account locks filtered.
 * ``fallback_models`` property — live catalogs for OAuth pickers until upstream #122203 ships.
 """
 
@@ -27,7 +27,7 @@ import logging
 import time
 import urllib.parse
 import urllib.request
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 from providers import register_provider
 from providers.base import ProviderProfile
@@ -39,6 +39,7 @@ from .credentials import env_token, allow_cli_fallback
 from .http_support import open_credentialed
 from .catalog import CatalogCache
 from .endpoints import api_origin as _api_origin
+from .model_access import fetch_access_context, model_rows, organization_id
 
 logger = logging.getLogger("plugins.commandcode_oauth")
 
@@ -98,8 +99,9 @@ class CommandCodeOAuthProfile(ProviderProfile):
             if not token:
                 return self._offline_models
             origin = self._catalog_origin()
-            return self._catalog_cache.read(self._catalog_key(token, origin), lambda: self.fetch_models(
-                api_key=token, base_url=origin, timeout=3.0)) or self._offline_models
+            models = self._catalog_cache.read(self._catalog_key(token, origin), lambda: self.fetch_models(
+                api_key=token, base_url=origin, timeout=3.0))
+            return models if models is not None else self._offline_models
         except Exception:
             logger.debug("commandcode: compatibility catalog unavailable", exc_info=True)
             return self._offline_models
@@ -162,40 +164,40 @@ class CommandCodeOAuthProfile(ProviderProfile):
         }
 
     def discover_models(self, **kwargs: Any) -> list[dict[str, Any]] | None:
-        models = self.fetch_models(api_key=kwargs.get("api_key"), base_url=kwargs.get("base_url"),
-                                   timeout=kwargs.get("timeout", 8.0))
-        return [{"id": model, "label": model} for model in models] if models is not None else None
+        token = self._credential(kwargs.get("api_key"))
+        if not token:
+            return None
+        origin = _api_origin(kwargs.get("base_url")) if kwargs.get("base_url") else self._catalog_origin()
+        key = self._catalog_key(token, origin)
+        models = self._catalog_cache.read(key, lambda: self.fetch_models(
+            api_key=token, base_url=origin, timeout=kwargs.get("timeout", 8.0)))
+        return self._catalog_cache.rows(key) if models is not None else None
 
     def fetch_models(
         self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
-        """Public model catalog, zero-cost entries first; not an account entitlement check.
-
-        ``None`` (not ``[]``) on failure. Successful native probes seed the property cache too,
-        so newer cores merging fallback_models under the same credentials use those live IDs.
-        """
+        """Client catalog minus hidden models and confirmed account locks; unknown access stays open."""
         token = self._credential(api_key)
         if not token:
             return None
         origin = _api_origin(base_url) if base_url else self._catalog_origin()
         key = self._catalog_key(token, origin)
-        payload = _http_json(f"{origin}{_PROVIDER_PATH_MARKER}/models", token, timeout=timeout)
-        models: List[str] = []
-        if isinstance(payload, dict):
-            rows = payload.get("data") or payload.get("models") or []
-            for item in rows if isinstance(rows, list) else []:
-                model_id = item.get("id") if isinstance(item, dict) else item
-                if isinstance(model_id, str) and model_id.strip():
-                    if model_id.strip() not in models:
-                        models.append(model_id.strip())
-        if not models:
+        deadline = time.monotonic() + timeout
+        payload = _http_json(f"{origin}{_PROVIDER_PATH_MARKER}/models?view=client", token, timeout=timeout)
+        rows = model_rows(payload)
+        if rows is None:
             self._catalog_cache.remember(key, None)
             return None
+        raw = payload.get("data") or payload.get("models") or []
+        if any(isinstance(row, dict) and "category" in row for row in raw):
+            context = fetch_access_context(origin, token, _http_json, deadline=deadline)
+            rows = model_rows(payload, context)
+        models = [row["id"] for row in rows if row["available"]]
         for name in reversed(ZERO_COST_MODELS):
             if name in models:
                 models.remove(name)
                 models.insert(0, name)
-        self._catalog_cache.remember(key, models)
+        self._catalog_cache.remember(key, models, rows=rows)
         return models
 
     def fetch_account_usage(self, *, base_url: str | None = None, api_key: str | None = None):
@@ -215,14 +217,7 @@ class CommandCodeOAuthProfile(ProviderProfile):
             remaining = deadline - time.monotonic()
             return _http_json(f"{origin}{path}", token, timeout=min(4.0, remaining)) if remaining > 0 else None
 
-        org_id = ""
-        whoami = get("/alpha/whoami")
-        if isinstance(whoami, dict):
-            for key in ("organizationId", "orgId", "organization_id"):
-                value = whoami.get(key)
-                if isinstance(value, str) and value.strip():
-                    org_id = value.strip()
-                    break
+        org_id = organization_id(get("/alpha/whoami"))
         suffix = f"?orgId={urllib.parse.quote(org_id)}" if org_id else ""
         credits_payload = get(f"/alpha/billing/credits{suffix}")
         if not isinstance(credits_payload, dict):

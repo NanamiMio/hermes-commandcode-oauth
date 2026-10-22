@@ -8,7 +8,8 @@ from typing import Callable
 
 @dataclass
 class _Entry:
-    models: tuple[str, ...] = ()
+    models: tuple[str, ...] | None = None
+    rows: tuple[dict, ...] = ()
     retry_at: float = 0
     fetching: bool = False
 
@@ -31,22 +32,29 @@ class CatalogCache:
                 del self._entries[old_key]
         return entry
 
-    def remember(self, key: tuple[str, str, str], models: list[str] | None) -> None:
+    def remember(self, key: tuple[str, str, str], models: list[str] | None, *, rows=None) -> None:
         with self._lock:
             entry = self._entry(key)
-            if models:
+            if models is not None:
                 entry.models = tuple(models)
-            entry.retry_at = monotonic() + (300 if models else 60)
+                entry.rows = tuple(dict(row) for row in (rows or []))
+            entry.retry_at = monotonic() + (300 if models is not None else 60)
 
-    def read(self, key: tuple[str, str, str], fetch: Callable[[], list[str] | None]) -> tuple[str, ...]:
+    def read(self, key: tuple[str, str, str], fetch: Callable[[], list[str] | None]) -> tuple[str, ...] | None:
         with self._lock:
             entry = self._entry(key)
             if entry.fetching or monotonic() < entry.retry_at:
                 return entry.models
             entry.fetching = True
         try:
-            self.remember(key, fetch())
+            models = fetch()
+            self.remember(key, models, rows=self.rows(key))
         finally:
             with self._lock:
                 entry.fetching = False
         return entry.models
+
+    def rows(self, key: tuple[str, str, str]) -> list[dict]:
+        with self._lock:
+            entry = self._entries.get(key)
+            return [dict(row) for row in entry.rows] if entry else []
