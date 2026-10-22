@@ -35,6 +35,18 @@ error classifications include recovery hints, and screenshot tool results keep t
 Custom `default_headers` and a supplied synchronous `httpx.Client` are used by sync, streaming
 and async calls. A caller-supplied client remains the caller's responsibility to close.
 
+## Recovery behavior
+
+Explicit upstream `rate limit exceeded(RPM)` errors are rate limits even when the relay
+wraps them in status 402. They carry `error_context.rate_limit_scope="model"`; Hermes
+cores with the matching cooldown support bench only that model. Real insufficient-credit
+errors remain account-wide billing failures. The companion local Hermes routing fix also
+stops unavailable OAuth plugin credentials from resolving through OpenRouter.
+
+Generation and account probes reject an OpenRouter base URL before sending a credential.
+Custom Command Code relays remain supported. An HTML 404 is an endpoint/format failure;
+a structured model-not-found 404 remains a model failure.
+
 ## Install
 
 Requires Hermes **0.21.6 or later**, which includes the generic OAuth plugin auxiliary router.

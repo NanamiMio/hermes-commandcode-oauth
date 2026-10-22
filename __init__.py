@@ -38,6 +38,7 @@ from .transport import ALPHA_ORIGIN, CommandCodeAlphaClient
 from .credentials import env_token, allow_cli_fallback
 from .http_support import open_credentialed
 from .catalog import CatalogCache
+from .endpoints import api_origin as _api_origin
 
 logger = logging.getLogger("plugins.commandcode_oauth")
 
@@ -61,16 +62,6 @@ FALLBACK_MODELS = (
 
 # The portal endpoints live at the API origin, not under the Provider API's /provider/v1.
 _PROVIDER_PATH_MARKER = "/provider/v1"
-
-
-def _api_origin(base_url: Optional[str]) -> str:
-    raw = (base_url or "").strip().rstrip("/")
-    if not raw:
-        raw = ALPHA_ORIGIN
-    parsed = urllib.parse.urlsplit(raw)
-    if parsed.scheme and parsed.netloc:
-        return f"{parsed.scheme}://{parsed.netloc}"
-    return ALPHA_ORIGIN
 
 
 def _http_json(url: str, token: str, *, timeout: float) -> Optional[Any]:

@@ -8,8 +8,8 @@ matter are the ones the community bridge documents as non-obvious on this endpoi
 * ``402 Insufficient Balance`` arrives as an **error event inside a 200 stream** — our
   transport turns it into a ``CommandCodeAPIError`` with the status attached, and this hook
   maps it to ``billing`` so the pool parks the credential instead of retrying forever;
-* throttling is a plain ``429`` (``rate_limit``), and the model-scoped "this account cannot
-  use that model" case is left to the generic pipeline;
+* throttling can be a plain ``429`` or a model RPM error wrapped in ``402``;
+  the latter carries a model-scoped cooldown hint instead of benching the account;
 * a stream that ends without any visible output is raised as a 502 by the transport
   (fail closed), which lands on ``server_error`` → retry, not a silent empty answer.
 
@@ -44,6 +44,13 @@ def classify_api_error(
     code = _status_of(error, status_code)
     text = f"{message or ''} {body or ''} {error or ''}".lower()
 
+    if getattr(error, "endpoint_error", False):
+        return {"reason": "format_error", "retryable": False, "should_fallback": True}
+    # The relay wraps upstream model RPM throttles in a 402 stream error. A real
+    # credit failure still takes the billing path; the explicit RPM marker is essential.
+    if "rate limit exceeded(rpm)" in text or "rate limit exceeded (rpm)" in text:
+        return {"reason": "rate_limit", "should_rotate_credential": True, "should_fallback": True,
+                "error_context": {"rate_limit_scope": "model"}}
     if code == 402 or "insufficient balance" in text or "insufficient_balance" in text:
         return {"reason": "billing", "retryable": False, "should_rotate_credential": True, "should_fallback": True}
     if code == 401:
@@ -64,6 +71,8 @@ def classify_api_error(
         return {"reason": "server_error"}
     if code in (504, 408):
         return {"reason": "timeout"}
+    if code == 404 and ("<!doctype html" in text or "<html" in text):
+        return {"reason": "format_error", "retryable": False, "should_fallback": True}
     if code == 404:
         return {"reason": "model_not_found", "retryable": False, "should_fallback": True}
     if code == 413:

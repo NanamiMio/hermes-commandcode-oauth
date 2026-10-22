@@ -49,6 +49,11 @@ else:  # Standalone fixtures also load this file outside its package.
     from credentials import env_token, allow_cli_fallback
     from http_support import open_credentialed
 
+try:
+    from .endpoints import api_origin
+except ImportError:  # Standalone transport tests and consumers.
+    from endpoints import api_origin
+
 logger = logging.getLogger("plugins.commandcode_oauth.transport")
 
 ALPHA_ORIGIN = "https://api.commandcode.ai"
@@ -377,10 +382,7 @@ def generate_url(base_url: Optional[str] = None) -> str:
     ``resolve_runtime_provider`` hands out, as a bare origin, or as a self-hosted proxy, so
     reduce it to its origin before appending the route.
     """
-    raw = str(base_url or "").strip().rstrip("/")
-    parsed = urllib.parse.urlsplit(raw)
-    origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ALPHA_ORIGIN
-    return f"{origin}{ALPHA_PATH}"
+    return f"{api_origin(base_url)}{ALPHA_PATH}"
 
 
 def coerce_timeout(value: Any, default: float = DEFAULT_TIMEOUT_S) -> float:
