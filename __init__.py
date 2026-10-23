@@ -101,10 +101,12 @@ class CommandCodeOAuthProfile(ProviderProfile):
             origin = self._catalog_origin()
             models = self._catalog_cache.read(self._catalog_key(token, origin), lambda: self.fetch_models(
                 api_key=token, base_url=origin, timeout=3.0))
-            return models if models is not None else self._offline_models
+            # An authenticated probe failure is not permission to advertise the
+            # static catalog: it includes models this account may not access.
+            return models if models is not None else ()
         except Exception:
             logger.debug("commandcode: compatibility catalog unavailable", exc_info=True)
-            return self._offline_models
+            return ()
 
     @fallback_models.setter
     def fallback_models(self, models: tuple[str, ...]) -> None:
@@ -191,6 +193,12 @@ class CommandCodeOAuthProfile(ProviderProfile):
         raw = payload.get("data") or payload.get("models") or []
         if any(isinstance(row, dict) and "category" in row for row in raw):
             context = fetch_access_context(origin, token, _http_json, deadline=deadline)
+            if context is None:
+                # Keep the last verified list and its lock notes. In particular,
+                # never cache a public catalog as an account catalog on timeout.
+                logger.warning("commandcode: account access lookup incomplete; retaining verified catalog")
+                self._catalog_cache.remember(key, None)
+                return None
             rows = model_rows(payload, context)
         models = [row["id"] for row in rows if row["available"]]
         for name in reversed(ZERO_COST_MODELS):

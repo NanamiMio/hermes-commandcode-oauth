@@ -20,7 +20,7 @@ def organization_id(whoami):
 
 
 def fetch_access_context(origin, token, get_json, *, deadline):
-    """Share the catalog's timeout budget; an incomplete billing lookup grants no lock."""
+    """Share the timeout budget; None means access could not be verified."""
     def get(path):
         remaining = deadline - time.monotonic()
         return get_json(origin + path, token, timeout=remaining) if remaining > 0 else None

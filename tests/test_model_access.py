@@ -10,10 +10,17 @@ from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 import test_plugin as fixtures
-from model_access import access_note, model_rows, organization_id
+from model_access import access_note, model_rows, organization_id, fetch_access_context
 
 
 class AccessRuleTest(unittest.TestCase):
+    def test_expired_deadline_does_not_claim_verified_access(self):
+        with patch('model_access.time.monotonic', return_value=10), \
+                patch('model_access.organization_id') as organization:
+            self.assertIsNone(fetch_access_context('https://fixture.test', 'token',
+                lambda *args, **kwargs: self.fail('expired budget must not send requests'), deadline=9))
+            organization.assert_not_called()
+
     def test_plan_rank_extra_credits_unknowns_and_hidden_rows(self):
         pro = {"id": "fixture/pro", "category": "premium", "minimumPlan": "individual-pro"}
         go = {"plan": "individual-go", "extra": False}
@@ -108,14 +115,68 @@ class AccountCatalogTest(unittest.TestCase):
             self.assertEqual(self.profile.discover_models()[0]["available"], False)
             self.assertEqual(request.call_count, 4)
 
-    def test_billing_outage_and_unknown_plan_do_not_invent_locks(self):
+    def test_billing_outage_and_unknown_plan_do_not_publish_unverified_catalog(self):
         for plan in (None, "future-plan"):
             def get(url, token, **kwargs):
                 if "/subscriptions" in url:
                     return None if plan is None else {"success": True, "data": {"planId": plan, "status": "active"}}
                 return self.response(url, token, **kwargs)
             with self.subTest(plan=plan), patch.object(self.module, "_http_json", side_effect=get):
-                self.assertEqual(self.profile.fetch_models(api_key="fixture-token"), ["fixture/go", "fixture/pro"])
+                self.assertIsNone(self.profile.fetch_models(api_key="fixture-token"))
+                self.assertEqual(self.profile.fallback_models, ())
+                self.assertIsNone(self.profile.discover_models())
+
+    def test_failed_refresh_retains_verified_models_and_lock_notes_then_recovers(self):
+        with patch.object(self.module.catalog, "monotonic", return_value=100) as clock:
+            with patch.object(self.module, "_http_json", side_effect=self.response):
+                self.assertEqual(self.profile.fallback_models, ("fixture/go",))
+                verified = self.profile.discover_models()
+            clock.return_value = 401
+            def outage(url, token, **kwargs):
+                return None if "/subscriptions" in url else self.response(url, token, **kwargs)
+            with patch.object(self.module, "_http_json", side_effect=outage) as request:
+                self.assertEqual(self.profile.fallback_models, ("fixture/go",))
+                self.assertEqual(self.profile.discover_models(), verified)
+                calls = request.call_count
+                clock.return_value = 450
+                self.assertEqual(self.profile.fallback_models, ("fixture/go",))
+                self.assertEqual(request.call_count, calls)
+            clock.return_value = 462
+            def unlocked(url, token, **kwargs):
+                value = self.response(url, token, **kwargs)
+                if "/credits" in url:
+                    value["credits"]["purchasedCredits"] = 1
+                return value
+            with patch.object(self.module, "_http_json", side_effect=unlocked):
+                self.assertEqual(self.profile.fallback_models, ("fixture/go", "fixture/pro"))
+
+    def test_timeout_does_not_publish_public_catalog_or_static_models(self):
+        with patch.object(self.module, "_http_json", side_effect=self.response), \
+                patch.object(self.module, "fetch_access_context", return_value=None):
+            self.assertEqual(self.profile.fallback_models, ())
+            self.assertIsNone(self.profile.discover_models())
+
+    def test_failed_new_account_does_not_reuse_previous_accounts_access(self):
+        with patch.object(self.module, "_http_json", side_effect=self.response):
+            self.assertEqual(self.profile.fallback_models, ("fixture/go",))
+        with patch.dict(os.environ, {"COMMANDCODE_CLI_TOKEN": "other-token"}), \
+                patch.object(self.module, "_http_json", return_value={"data": self.rows}), \
+                patch.object(self.module, "fetch_access_context", return_value=None):
+            self.assertEqual(self.profile.fallback_models, ())
+
+    def test_hermes_disk_cache_does_not_expand_on_failed_access_refresh(self):
+        from hermes_cli.models import cached_provider_model_ids
+        from pathlib import Path
+        with patch('providers.get_provider_profile', return_value=self.profile), \
+                patch.object(self.module.catalog, 'monotonic', return_value=100) as clock:
+            with patch.object(self.module, '_http_json', side_effect=self.response):
+                self.assertEqual(cached_provider_model_ids(self.profile.name, force_refresh=True), ['fixture/go'])
+            clock.return_value = 401
+            with patch.object(self.module, '_http_json', side_effect=self.response), \
+                    patch.object(self.module, 'fetch_access_context', return_value=None):
+                self.assertEqual(cached_provider_model_ids(self.profile.name, force_refresh=True), ['fixture/go'])
+            saved = json.loads((Path(self.home) / 'provider_models_cache.json').read_text())
+            self.assertEqual(saved[self.profile.name]['models'], ['fixture/go'])
 
     def test_purchased_or_free_credits_unlock_models_but_monthly_credits_do_not(self):
         for field in ("purchasedCredits", "freeCredits"):

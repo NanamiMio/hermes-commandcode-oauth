@@ -41,8 +41,11 @@ The catalog uses the installed Command Code 1.87.1 client's access rules: model
 `minimumPlan`/`category`, the active subscription, and purchased/free extra credits.
 Confirmed locked models are omitted from Hermes' selectable model IDs; detailed discovery
 keeps their `available: false` and a lock note. Hidden models are excluded entirely.
-Unavailable billing data and unknown plans do not infer locks. The result is cached per
-profile, credential and API origin for five minutes, within the existing probe timeout.
+Unavailable billing data, expired lookup budgets and unknown plans do not produce a new
+account catalog. The last verified list and lock notes are retained; an authenticated
+cold lookup returns no models rather than advertising the static fallback list.
+Successful results are cached per profile, credential and API origin for five minutes;
+failed lookups back off for one minute, within the existing probe timeout.
 A successful empty catalog stays empty rather than restoring offline model names.
 Plan access does not guarantee that a model is below its RPM limit.
 

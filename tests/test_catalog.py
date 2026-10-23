@@ -112,10 +112,10 @@ class OAuthCatalogTest(unittest.TestCase):
             self.assertEqual(merge_profile_catalog(self.profile.name, self.profile, live), ["fixture/live"])
         get.assert_called_once()
 
-    def test_cold_failure_returns_offline_models_without_repeated_requests(self):
+    def test_authenticated_cold_failure_does_not_advertise_static_models(self):
         with patch.object(self.module, "_http_json", return_value=None) as get:
-            self.assertEqual(self.profile.fallback_models, self.module.FALLBACK_MODELS)
-            self.assertEqual(self.profile.fallback_models, self.module.FALLBACK_MODELS)
+            self.assertEqual(self.profile.fallback_models, ())
+            self.assertEqual(self.profile.fallback_models, ())
         get.assert_called_once()
 
     def test_desktop_curated_catalog_uses_configured_proxy_and_dynamic_rows(self):
@@ -142,7 +142,7 @@ class OAuthCatalogTest(unittest.TestCase):
             try:
                 self.assertTrue(started.wait(5))
                 second = workers.submit(lambda: self.profile.fallback_models)
-                self.assertEqual(second.result(timeout=2), self.module.FALLBACK_MODELS)
+                self.assertEqual(second.result(timeout=2), ())
                 self.assertEqual(request.call_count, 1)
             finally:
                 release.set()
