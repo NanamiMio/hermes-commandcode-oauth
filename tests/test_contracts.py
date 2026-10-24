@@ -61,11 +61,12 @@ class TransportContractTest(unittest.TestCase):
                 {"type": "text", "text": "Screenshot"},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]},
         ], "Qwen/Qwen3.8-Omni-Flash")
-        result = wire[-1]["content"][0]
+        result = wire[1]["content"][0]
         self.assertEqual((result["toolCallId"], result["toolName"]), ("shot-1", "screenshot"))
-        self.assertEqual(result["output"], {"type": "content", "value": [
-            {"type": "text", "text": "Screenshot"},
-            {"type": "media", "data": "AAAA", "mediaType": "image/png"}]})
+        self.assertIn("Screenshot", result["output"]["value"])
+        self.assertNotIn("AAAA", result["output"]["value"])
+        self.assertEqual(wire[-1]["content"][-1], {
+            "type": "image", "image": "data:image/png;base64,AAAA", "mimeType": "image/png"})
 
     def test_text_only_tool_result_has_a_placeholder_without_base64(self):
         _, wire = transport.format_messages([{"role": "tool", "tool_call_id": "shot-1", "content": [
@@ -99,8 +100,8 @@ class TransportContractTest(unittest.TestCase):
             {"role": "tool", "tool_call_id": "shot", "content": [
                 {"type": "image_url", "image_url": {"url": "https://images.test/screenshot.png"}}]}]}, "vision/model")
         self.assertEqual(body["params"]["max_tokens"], 8192)
-        self.assertEqual(body["params"]["messages"][0]["content"][0]["output"], {
-            "type": "content", "value": [{"type": "image-url", "url": "https://images.test/screenshot.png"}]})
+        self.assertEqual(body["params"]["messages"][-1]["content"][-1], {
+            "type": "image", "image": "https://images.test/screenshot.png", "mimeType": "image/png"})
 
 
 class RedirectContractTest(unittest.TestCase):
@@ -112,7 +113,7 @@ class RedirectContractTest(unittest.TestCase):
                 received.append(dict(self.headers))
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(b'{}')
+                self.wfile.write(b'{"user": {"id": "fixture"}}')
             def log_message(self, *args):
                 pass
 

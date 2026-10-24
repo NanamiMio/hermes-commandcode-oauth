@@ -99,7 +99,7 @@ class TransportRegressionTest(unittest.TestCase):
         for part, url, mime in cases:
             with self.subTest(part=part):
                 _, messages = transport.format_messages([{"role": "user", "content": [part]}], "vision/model")
-                image = messages[0]["content"][1]
+                image = messages[0]["content"][0]
                 self.assertEqual(image, {"type": "image", "image": url, "mimeType": mime})
 
     def test_unknown_parts_are_not_labelled_as_images(self):

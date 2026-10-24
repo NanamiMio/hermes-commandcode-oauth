@@ -62,7 +62,8 @@ ALPHA_GENERATE_URL = f"{ALPHA_ORIGIN}{ALPHA_PATH}"
 DEFAULT_TIMEOUT_S = 180.0
 CLI_AUTH_PATH = "~/.commandcode/auth.json"
 # The CLI's own wire version: the relay uses it for capability gating.
-CLI_WIRE_VERSION = "0.52.1"
+CLI_WIRE_VERSION = "1.87.1"
+DEFAULT_MAX_TOKENS = 64_000
 
 # Dashed slugs the picker may hand us → canonical wire ids the endpoint accepts.
 MODEL_ALIASES: Dict[str, str] = {
@@ -103,7 +104,7 @@ class CommandCodeAPIError(RuntimeError):
 def canonical_model_id(model_id: str) -> str:
     """Map dashed slugs / prefixed names onto the endpoint's canonical ids."""
     clean = (model_id or "").strip()
-    for prefix in ("command-code/", "commandcode-oauth/", "commandcode/"):
+    for prefix in ("command-code/", "commandcode-oauth/", "commandcode-alpha/", "commandcode/"):
         if clean.startswith(prefix):
             clean = clean[len(prefix):]
             break
@@ -206,16 +207,21 @@ def format_messages(
     ``model`` gates attachments: a text-only model gets a placeholder so the caller can still
     see that an image was attached, rather than a part the endpoint would drop.
     """
-    images_ok = (model or "").strip() not in _TEXT_ONLY_MODELS
+    images_ok = (model or "").strip().lower() not in {m.lower() for m in _TEXT_ONLY_MODELS}
     system_parts: List[str] = []
     wire_msgs: List[Dict[str, Any]] = []
     call_id_to_name: Dict[str, str] = {}
+    pending_tool_images: List[Dict[str, Any]] = []
 
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content", "")
+        # All results in a parallel tool batch must precede the synthetic user images.
+        if role != "tool" and pending_tool_images:
+            wire_msgs.append({"role": "user", "content": pending_tool_images})
+            pending_tool_images = []
 
-        if role == "system":
+        if role in ("system", "developer"):
             if isinstance(content, str) and content.strip():
                 system_parts.append(content.strip())
             elif isinstance(content, list):
@@ -223,27 +229,27 @@ def format_messages(
                     if isinstance(part, dict) and part.get("type") == "text":
                         system_parts.append(part.get("text", ""))
         elif role == "user":
-            texts: List[str] = []
             parts: List[Dict[str, Any]] = []
             if isinstance(content, str):
-                texts.append(content)
+                parts.append({"type": "text", "text": content})
             elif isinstance(content, list):
                 for part in content:
                     if not isinstance(part, dict):
                         continue
                     if part.get("type") == "text":
-                        texts.append(part.get("text", ""))
-                        continue
-                    media = _normalize_media_part(part) if images_ok else None
-                    if media is not None:
-                        parts.append(media)
+                        parts.append({"type": "text", "text": part.get("text", "")})
                     else:
-                        texts.append(_image_placeholder(part))
-            text = " ".join(t for t in texts if t)
-            parts.insert(0, {"type": "text", "text": text})
+                        media = _normalize_media_part(part) if images_ok else None
+                        parts.append(media or {"type": "text", "text": _image_placeholder(part)})
             wire_msgs.append({"role": "user", "content": parts})
         elif role == "assistant":
             parts: List[Dict[str, Any]] = []
+            reasoning = msg.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                parts.append({"type": "reasoning", "text": reasoning})
+            if isinstance(content, list):
+                parts.extend(part for part in content if isinstance(part, dict)
+                             and part.get("type") in ("text", "reasoning"))
             if isinstance(content, str) and content:
                 parts.append({"type": "text", "text": content})
             for call in msg.get("tool_calls") or []:
@@ -261,42 +267,41 @@ def format_messages(
             wire_msgs.append({"role": "assistant", "content": parts or [{"type": "text", "text": ""}]})
         elif role == "tool":
             call_id = msg.get("tool_call_id") or ""
+            if isinstance(content, list):
+                texts = []
+                for part in content:
+                    if not isinstance(part, dict):
+                        texts.append(str(part))
+                        continue
+                    if part.get("type") == "text":
+                        texts.append(part.get("text", ""))
+                    else:
+                        media = _normalize_media_part(part) if images_ok else None
+                        if media is not None:
+                            pending_tool_images.extend([
+                                {"type": "text", "text": f"Image returned by tool call {call_id}:"}, media])
+                            texts.append("[Tool image follows in the next user message]")
+                        else:
+                            texts.append(_image_placeholder(part))
+                val = "\n".join(texts)
+            else:
+                val = content if isinstance(content, str) else json.dumps(content)
             wire_msgs.append({
                 "role": "tool",
                 "content": [{
                     "type": "tool-result",
                     "toolCallId": call_id,
                     "toolName": call_id_to_name.get(call_id, "tool"),
-                    "output": _tool_output(content, images_ok),
+                    "output": {"type": "text", "value": val},
                 }],
             })
 
+    if pending_tool_images:
+        wire_msgs.append({"role": "user", "content": pending_tool_images})
     return "\n\n".join(system_parts), wire_msgs
 
 
-def _tool_output(content: Any, images_ok: bool) -> Dict[str, Any]:
-    """AI SDK tool output: preserve screenshot pixels rather than stringify their data URL."""
-    if not isinstance(content, list):
-        return {"type": "text", "value": content if isinstance(content, str) else json.dumps(content)}
-    parts = []
-    for part in content:
-        if not isinstance(part, dict):
-            parts.append({"type": "text", "text": str(part)})
-        elif part.get("type") == "text":
-            parts.append({"type": "text", "text": part.get("text", "")})
-        else:
-            media = _normalize_media_part(part) if images_ok else None
-            url = media.get("image", "") if media and media["type"] == "image" else ""
-            if url.startswith("data:") and ";base64," in url:
-                parts.append({"type": "media", "data": url.split(",", 1)[1], "mediaType": media["mimeType"]})
-            elif url.startswith(("https://", "http://")):
-                # AI SDK 6 accepts URL images in tool output; data URLs above also work on v5.
-                parts.append({"type": "image-url", "url": url})
-            else:
-                parts.append({"type": "text", "text": _image_placeholder(part)})
-    if any(part["type"] != "text" for part in parts):
-        return {"type": "content", "value": parts}
-    return {"type": "text", "value": "\n".join(part["text"] for part in parts)}
+
 
 
 def format_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -357,16 +362,19 @@ def _request_body(api_kwargs: Dict[str, Any], model: str) -> Dict[str, Any]:
         "messages": wire_msgs,
         "tools": format_tools(tools),
         "system": system_prompt,
-        "max_tokens": api_kwargs.get("max_tokens") or api_kwargs.get("max_completion_tokens") or 4096,
+        "max_tokens": api_kwargs.get("max_tokens") or api_kwargs.get("max_completion_tokens") or DEFAULT_MAX_TOKENS,
         "stream": True,
     }
     temperature = api_kwargs.get("temperature")
     if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
         params["temperature"] = temperature
 
+    if api_kwargs.get("reasoning_effort") is not None:
+        params["reasoning_effort"] = api_kwargs["reasoning_effort"]
+
     return {
         "config": workspace_config(),
-        "memory": "",
+        "memory": None,
         "taste": None,
         "skills": None,
         "permissionMode": "standard",
@@ -402,7 +410,7 @@ def coerce_timeout(value: Any, default: float = DEFAULT_TIMEOUT_S) -> float:
 
 
 @contextlib.contextmanager
-def _open_stream(url: str, body: Dict[str, Any], token: str, timeout: float, *, headers=None, http_client=None):
+def _open_stream(url: str, body: Dict[str, Any], token: str, timeout: float, *, headers=None, http_client=None, session_id=None):
     req = urllib.request.Request(url)
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Content-Type", "application/json")
@@ -411,7 +419,7 @@ def _open_stream(url: str, body: Dict[str, Any], token: str, timeout: float, *, 
     req.add_header("x-cli-environment", "production")
     req.add_header("x-taste-learning", "false")
     req.add_header("x-co-flag", "false")
-    req.add_header("x-session-id", str(uuid.uuid4()))
+    req.add_header("x-session-id", session_id or str(uuid.uuid4()))
     for name, value in (headers or {}).items():
         req.add_header(name, value)
     req.data = json.dumps(body).encode("utf-8")
@@ -457,6 +465,8 @@ def _iter_events(resp) -> Iterator[Dict[str, Any]]:
             continue
         if not isinstance(event, dict):
             continue
+        if event.get("type") == "abort":
+            raise CommandCodeAPIError("Command Code generation aborted", status_code=502)
         if event.get("type") == "error":
             err = event.get("error")
             # The wire puts the status at the top level and ``error`` is usually a plain
@@ -469,9 +479,20 @@ def _iter_events(resp) -> Iterator[Dict[str, Any]]:
                 status = status or err.get("statusCode") or err.get("status_code")
             else:
                 message = str(err or event.get("message") or "generation error")
-            code = int(status) if isinstance(status, (int, float)) else None
+            code = int(status) if str(status).isdigit() else None
             raise CommandCodeAPIError(f"Command Code stream error: {message}", status_code=code)
         yield event
+
+
+def _finish_reason(event: Dict[str, Any], has_tools: bool) -> str:
+    raw = event.get("rawFinishReason") or event.get("finishReason") or "stop"
+    if raw in ("refusal", "content_filter", "content-filter"):
+        return "content_filter"
+    if has_tools:
+        return "tool_calls"
+    return {"tool-calls": "tool_calls", "tool_use": "tool_calls",
+            "max_tokens": "length", "end_turn": "stop"}.get(raw, raw)
+
 
 
 def _usage_from_event(event: Dict[str, Any], previous: Optional[SimpleNamespace] = None) -> Optional[SimpleNamespace]:
@@ -585,6 +606,7 @@ class CommandCodeAlphaClient:
         self._generate_url = generate_url(self.base_url)
         self._default_headers = dict(default_headers or {})
         self._http_client = http_client
+        self._session_id = str(uuid.uuid4())
         self._timeout = coerce_timeout(timeout)
         self.is_closed = False
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
@@ -619,12 +641,24 @@ class CommandCodeAlphaClient:
     def _iter_stream(self, api_kwargs: Dict[str, Any]) -> Iterator[Any]:
         model, token, timeout, response_id = self._prepare(api_kwargs)
         body = _request_body(api_kwargs, model)
+        session = (api_kwargs.get("extra_body") or {}).get("commandcode_session_id")
+        if session:
+            try:
+                session = str(uuid.UUID(str(session)))
+            except ValueError:
+                session = str(uuid.uuid5(uuid.NAMESPACE_URL, f"hermes-commandcode:{session}"))
+        else:
+            session = self._session_id
+        body["threadId"] = session
+        headers = {**self._default_headers, **(api_kwargs.get("extra_headers") or {})}
         started = False
         finished = False
-        tool_calls: List[Any] = []
+        finish_event: Dict[str, Any] = {}
+        cache_write_tokens = 0
         usage = None
+        tool_calls: List[Any] = []
         with _open_stream(self._generate_url, body, token, timeout,
-                          headers=self._default_headers, http_client=self._http_client) as resp:
+                          session_id=session, headers=headers, http_client=self._http_client) as resp:
             for event in _iter_events(resp):
                 ev_type = event.get("type")
                 if ev_type == "text-delta":
@@ -640,7 +674,7 @@ class CommandCodeAlphaClient:
                 elif ev_type == "tool-call":
                     started = True
                     call_id = event.get("toolCallId") or str(uuid.uuid4())
-                    raw_input = event.get("input", {})
+                    raw_input = event.get("input", event.get("args", {}))
                     args = raw_input if isinstance(raw_input, str) else json.dumps(raw_input)
                     tool_calls.append(SimpleNamespace(
                         index=len(tool_calls), id=call_id, type="function",
@@ -648,17 +682,14 @@ class CommandCodeAlphaClient:
                     ))
                     yield _chunk(response_id, model, tool_calls=[tool_calls[-1]])
                 elif ev_type in ("finish", "finish-step"):
-                    finished = ev_type == "finish"
                     usage = _usage_from_event(event, usage)
-                    if not finished:
-                        continue
-                    if not started:
-                        raise CommandCodeAPIError("Command Code returned an empty stream", status_code=502)
-                    reason = "tool_calls" if tool_calls else (event.get("finishReason") or "stop")
-                    if usage is not None:
-                        yield _chunk(response_id, model, finish_reason=reason, usage=usage)
-                    else:
-                        yield _chunk(response_id, model, finish_reason=reason)
+                    if ev_type == "finish":
+                        finished = True
+                        finish_event = event
+                elif ev_type == "cache-write-tokens":
+                    value = event.get("cacheWriteTokens")
+                    if isinstance(value, (int, float)) and value >= 0:
+                        cache_write_tokens = value
         if not started or not finished:
             # "200 OK" whose stream stopped early: an empty turn is worse than an error.
             raise CommandCodeAPIError(
@@ -667,53 +698,33 @@ class CommandCodeAlphaClient:
                 status_code=502,
             )
 
+        if usage is not None and cache_write_tokens:
+            details = getattr(usage, "prompt_tokens_details", None)
+            if details is None:
+                details = SimpleNamespace(cached_tokens=0, cache_write_tokens=0)
+                usage.prompt_tokens_details = details
+            if not details.cache_write_tokens:
+                details.cache_write_tokens = cache_write_tokens
+        yield _chunk(response_id, model, finish_reason=_finish_reason(finish_event, bool(tool_calls)),
+                     usage=usage)
+
+
     def _complete(self, api_kwargs: Dict[str, Any]) -> SimpleNamespace:
         """Run the stream to completion and aggregate into one response object."""
-        model, token, timeout, response_id = self._prepare(api_kwargs)
-        body = _request_body(api_kwargs, model)
         content_parts: List[str] = []
         reasoning_parts: List[str] = []
         tool_calls: List[Any] = []
-        finish_reason = "stop"
         usage = None
-        started = False
-        finished = False
-        with _open_stream(self._generate_url, body, token, timeout,
-                          headers=self._default_headers, http_client=self._http_client) as resp:
-            for event in _iter_events(resp):
-                ev_type = event.get("type")
-                if ev_type == "text-delta":
-                    if event.get("text"):
-                        started = True
-                        content_parts.append(event["text"])
-                elif ev_type == "reasoning-delta":
-                    if event.get("text"):
-                        started = True
-                        reasoning_parts.append(event["text"])
-                elif ev_type == "tool-call":
-                    started = True
-                    raw_input = event.get("input", {})
-                    args = raw_input if isinstance(raw_input, str) else json.dumps(raw_input)
-                    tool_calls.append(SimpleNamespace(
-                        id=event.get("toolCallId") or str(uuid.uuid4()),
-                        type="function",
-                        function=SimpleNamespace(name=event.get("toolName", "tool"), arguments=args),
-                    ))
-                    finish_reason = "tool_calls"
-                elif ev_type in ("finish", "finish-step"):
-                    finished = ev_type == "finish"
-                    usage = _usage_from_event(event, usage)
-                    if not tool_calls and event.get("finishReason"):
-                        finish_reason = event["finishReason"]
-        if not started or not finished:
-            raise CommandCodeAPIError(
-                "Command Code returned an empty/incomplete stream"
-                f" (started={started}, finished={finished}, tools={len(tool_calls)})",
-                status_code=502,
-            )
-        return _response(
-            response_id, model,
-            "".join(content_parts) or None,
-            "".join(reasoning_parts) or None,
-            tool_calls, finish_reason, usage,
-        )
+        finish_reason = "stop"
+        for chunk in self._iter_stream(api_kwargs):
+            choice = chunk.choices[0]
+            delta = choice.delta
+            if delta.content:
+                content_parts.append(delta.content)
+            if delta.reasoning_content:
+                reasoning_parts.append(delta.reasoning_content)
+            tool_calls.extend(delta.tool_calls or [])
+            usage = chunk.usage or usage
+            finish_reason = choice.finish_reason or finish_reason
+        return _response(chunk.id, chunk.model, "".join(content_parts) or None,
+                         "".join(reasoning_parts) or None, tool_calls, finish_reason, usage)

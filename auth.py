@@ -24,10 +24,11 @@ import secrets
 import threading
 import time
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
+import urllib.error
 
 if __package__:
     from .credentials import env_token
@@ -101,13 +102,18 @@ def validate(token: str, *, timeout: float = 10.0) -> Optional[Dict[str, str]]:
         req.add_header("User-Agent", "cli")
         with open_credentialed(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:
-        logger.debug("validate: %s", exc)
-        return None
-    user = data.get("user") if isinstance(data, dict) else None
-    if isinstance(user, dict):
-        return {"user_id": str(user.get("id") or ""), "user_name": str(user.get("userName") or "")}
-    return {"user_id": "", "user_name": ""}
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        if exc.code in (401, 403):
+            return None
+        raise CommandCodeAuthError(f"Command Code identity check failed (HTTP {exc.code}); retry later.") from exc
+    except (OSError, ValueError) as exc:
+        raise CommandCodeAuthError("Command Code identity check unavailable; retry later.") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("user"), dict):
+        raise CommandCodeAuthError("Command Code returned an invalid identity response; retry later.")
+    user = data["user"]
+    return {"user_id": str(user.get("id") or ""), "user_name": str(user.get("userName") or "")}
+
 
 
 # ── browser hand-off (loopback) ──────────────────────────────────────────────
@@ -117,13 +123,15 @@ def _callback_handler(expected_state: str):
 
     class _Handler(BaseHTTPRequestHandler):
         def _cors(self, origin: Optional[str] = None) -> None:
-            self.send_header("Access-Control-Allow-Origin", origin or STUDIO_URL)
+            allowed = (STUDIO_URL, "https://staging.commandcode.ai", "http://localhost:3000")
+            self.send_header("Access-Control-Allow-Origin", origin if origin in allowed else STUDIO_URL)
             self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
         def _json(self, status: int, payload: Dict[str, Any], origin: Optional[str] = None) -> None:
             self.send_response(status)
             self._cors(origin)
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
@@ -131,6 +139,8 @@ def _callback_handler(expected_state: str):
         def do_OPTIONS(self) -> None:  # noqa: N802
             self.send_response(204)
             self._cors(self.headers.get("Origin"))
+            if self.headers.get("Access-Control-Request-Private-Network") == "true":
+                self.send_header("Access-Control-Allow-Private-Network", "true")
             self.end_headers()
 
         def do_POST(self) -> None:  # noqa: N802
@@ -138,28 +148,50 @@ def _callback_handler(expected_state: str):
             if urlparse(self.path).path != "/callback":
                 self._json(404, {"success": False, "error": "not found"}, origin)
                 return
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if content_type not in ("application/json", "application/x-www-form-urlencoded"):
+                self._json(415, {"success": False, "error": "unsupported content type"}, origin)
+                return
             try:
                 length = int(self.headers.get("Content-Length", 0))
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            except Exception as exc:
-                self._json(400, {"success": False, "error": str(exc)}, origin)
+                if not 0 < length <= 65536:
+                    self._json(413, {"success": False, "error": "invalid body size"}, origin)
+                    return
+                self.connection.settimeout(5)
+                raw = self.rfile.read(length).decode("utf-8")
+                payload = ({key: values[0] for key, values in parse_qs(raw).items()}
+                           if content_type == "application/x-www-form-urlencoded" else json.loads(raw))
+            except (ValueError, OSError):
+                self._json(400, {"success": False, "error": "invalid callback body"}, origin)
                 return
             if not isinstance(payload, dict) or payload.get("state") != expected_state:
-                result["error"] = "OAuth state mismatch"
-                self._json(400, {"success": False, "error": "state mismatch"}, origin)
+                # Unrelated or stale callbacks must not kill a valid login in progress.
+                self._json(403, {"success": False, "error": "state mismatch"}, origin)
                 return
-            token = str(payload.get("apiKey") or "").strip()
-            if not token:
-                result["error"] = "missing apiKey"
+            if payload.get("error"):
+                result["error"] = str(payload.get("error_description") or payload["error"])
+                self._json(200, {"success": True}, origin)
+                return
+            token = payload.get("apiKey")
+            if not isinstance(token, str) or not token.strip():
                 self._json(400, {"success": False, "error": "missing apiKey"}, origin)
                 return
+            # Send the browser landing page directly; no token in a redirect URL.
+            if content_type == "application/x-www-form-urlencoded":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(b"<!doctype html><title>Signed in</title><p>Signed in. Return to Hermes.</p>")
+            else:
+                self._json(200, {"success": True}, origin)
             result["payload"] = payload
-            self._json(200, {"success": True}, origin)
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
             return
 
     return _Handler, result
+
 
 
 def _start_callback_server(state: str, *, port: int = CALLBACK_PORT):
@@ -172,7 +204,8 @@ def _start_callback_server(state: str, *, port: int = CALLBACK_PORT):
     """
     handler_cls, result = _callback_handler(state)
 
-    class _Server(HTTPServer):
+    class _Server(ThreadingHTTPServer):
+        daemon_threads = True
         allow_reuse_address = True
 
     try:
@@ -201,15 +234,15 @@ def _wait_for_callback(result, *, timeout: float = 120.0) -> Dict[str, Any]:
 
 def login(*, open_browser: bool = True, timeout: float = 120.0) -> Dict[str, Any]:
     """Import the CLI's grant, or fall back to the studio's loopback hand-off."""
+    override = env_token()
     try:
-        override = env_token()
         token = override or read_cli_token()
+    except CommandCodeAuthError:
+        token = ""
+    if token:
         identity = validate(token)
         if identity is not None:
-            logger.debug("using the Command Code CLI grant for %s", identity.get("user_name") or "user")
             return {"token": token, "source": "commandcode-env" if override else "commandcode-cli", **identity}
-    except CommandCodeAuthError as exc:
-        logger.debug("CLI grant unusable, falling back to browser: %s", exc)
 
     state = secrets.token_urlsafe(32)
     # Own the listener before advertising any address to the browser.
@@ -217,7 +250,7 @@ def login(*, open_browser: bool = True, timeout: float = 120.0) -> Dict[str, Any
     try:
         host, port = server.server_address[:2]
         callback = f"http://{host}:{port}/callback"
-        auth_url = f"{STUDIO_URL}/studio/auth/cli?{urlencode({'callback': callback, 'state': state})}"
+        auth_url = f"{STUDIO_URL}/studio/auth/cli?{urlencode({'callback': callback, 'state': state, 'mode': 'redirect'})}"
         print("Sign in with Command Code in your browser:")
         print(f"  {auth_url}\n")
         print("Waiting for the sign-in callback…")
@@ -345,8 +378,13 @@ def refresh_credential(entry: Any) -> Mapping[str, Any]:
                 raise
     identity = validate(token)
     if identity is None:
-        raise CommandCodeAuthError(
-            "Command Code rejected the stored credential; run `hermes auth add commandcode-oauth` again."
+        original = str(getattr(entry, "access_token", "") or "").strip()
+        if original and token != original:
+            raise CommandCodeAuthError("Replacement key was rejected; existing pool credential was not invalidated.")
+        from hermes_cli.auth_constants import AuthError
+        raise AuthError(
+            "Command Code rejected the stored credential; run `hermes auth add commandcode-oauth` again.",
+            provider=CANONICAL_PROVIDER, code="invalid_token", relogin_required=True,
         )
     original = str(getattr(entry, "access_token", "") or "").strip()
     if token != original:

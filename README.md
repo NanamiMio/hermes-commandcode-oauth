@@ -31,9 +31,25 @@ Behaviour worth knowing, all covered by tests:
 
 Version 0.1.3 also checks the provider contracts used by the desktop picker and recovery loop:
 usage windows use Hermes' `AccountUsageWindow`, credentials respect the active profile,
-error classifications include recovery hints, and screenshot tool results keep their media parts.
+error classifications include recovery hints, and screenshot tool results retain their pixels.
 Custom `default_headers` and a supplied synchronous `httpx.Client` are used by sync, streaming
 and async calls. A caller-supplied client remains the caller's responsibility to close.
+
+## Version 0.1.4 protocol integration
+
+Uses the Command Code CLI 1.87.1 wire version. Only a complete final stream produces
+success; trailing errors and aborts remain failures. Sync and streaming share one parser,
+including sparse usage updates, tool argument aliases and trailing cache-write events.
+Hermes session IDs survive client rebuilds. Developer/reasoning messages and media order
+are preserved; screenshot results become user image messages after the full tool-result batch.
+The default output budget is 64,000 tokens, with explicit budgets and supported reasoning
+levels forwarded. A versioned snapshot describes 13 common models; it does not replace the
+live account catalog. JSON object/schema response formats are not advertised.
+
+Browser callbacks accept JSON and form posts, validate state without cancelling a valid
+pending login, and bind before showing the URL. Temporary identity-service failures do not
+start a new browser login. Rejected existing grants use Hermes' terminal-auth contract.
+Vendor CLI credentials remain read-only; browser grants stay in Hermes' scoped pool.
 
 ## Account model availability
 

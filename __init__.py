@@ -33,6 +33,8 @@ from providers import register_provider
 from providers.base import ProviderProfile
 
 from .auth import CommandCodeAuthError, auth_handler, read_cli_token, refresh_credential, validate
+from .model_metadata import capability_overrides, model_info
+from .transport import DEFAULT_MAX_TOKENS, canonical_model_id
 from .errors import classify_api_error
 from .transport import ALPHA_ORIGIN, CommandCodeAlphaClient
 from .credentials import env_token, allow_cli_fallback
@@ -133,6 +135,30 @@ class CommandCodeOAuthProfile(ProviderProfile):
     def create_client(self, **client_kwargs: Any) -> Any:
         """Supply the ``/alpha`` transport instead of an OpenAI-over-HTTP client."""
         return CommandCodeAlphaClient(**client_kwargs)
+
+    def build_extra_body(self, *, session_id=None, **context):
+        return {"commandcode_session_id": session_id} if session_id else {}
+
+
+    def supported_reasoning_efforts(self, model):
+        info = model_info(canonical_model_id(model or ""))
+        return tuple("none" if e == "off" else e for e in info["efforts"]) if info else None
+
+
+    def build_api_kwargs_extras(self, *, reasoning_config=None, model=None, **context):
+        from agent.reasoning_effort import clamp_effort
+        levels = self.supported_reasoning_efforts(model)
+        if not isinstance(reasoning_config, dict) or not levels:
+            return {}, {}
+        requested = ("none" if reasoning_config.get("enabled") is False
+                     else reasoning_config.get("effort"))
+        if not requested:
+            return {}, {}
+        effort = clamp_effort(requested, levels)
+        if effort not in levels:
+            raise ValueError(f"Unsupported Command Code reasoning effort: {effort}")
+        return {}, {"reasoning_effort": "off" if effort == "none" else effort}
+
 
     def _credential(self, api_key: str | None = None, *, cli_fallback: bool = True) -> str:
         """Resolve an explicit key, env override, Hermes pool, then the read-only CLI file."""
@@ -294,6 +320,11 @@ commandcode_oauth = CommandCodeOAuthProfile(
     display_name="CommandCode (OAuth)",
     description="Command Code — CLI sign-in over the same /alpha/generate endpoint the CLI uses",
     fallback_models=FALLBACK_MODELS,
+    default_max_tokens=DEFAULT_MAX_TOKENS,
+    model_capabilities=capability_overrides(),
+    supports_vision=True,
+    supports_vision_tool_messages=True,
+    unsupported_response_formats=("json_schema", "json_object"),
     # Provider-owned auth / classification. These three are dataclass *fields* on
     # ProviderProfile (default None), so they belong in the constructor — declaring them in
     # the class body would be shadowed by the instance default.
