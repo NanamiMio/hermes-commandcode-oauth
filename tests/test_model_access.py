@@ -109,7 +109,9 @@ class AccountCatalogTest(unittest.TestCase):
 
     def test_all_locked_is_cached_empty_without_restoring_offline_models(self):
         self.rows = self.rows[1:2]
-        with patch.object(self.module, "_http_json", side_effect=self.response) as request:
+        # Exercise this profile's cache without config discovery probing other registered profiles.
+        with patch.object(self.profile, "_catalog_origin", return_value=self.profile.base_url), \
+                patch.object(self.module, "_http_json", side_effect=self.response) as request:
             self.assertEqual(self.profile.fallback_models, ())
             self.assertEqual(self.profile.fallback_models, ())
             self.assertEqual(self.profile.discover_models()[0]["available"], False)
